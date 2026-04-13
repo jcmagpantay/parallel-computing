@@ -56,6 +56,8 @@ SSH_USER=${3:-$(whoami)}
 SSH_PASS=${4:-"useruser"} # Defaults to lab password
 OS_NAME=$(uname)
 
+REMOTE_WORKSPACE="~/Documents/jcmagpantay-remote"
+
 # Check for sshpass utility
 if ! command -v sshpass &> /dev/null; then
     echo "WARNING: 'sshpass' is not installed."
@@ -149,8 +151,12 @@ echo ""
 echo "=== Step 4: Deploying to slaves ==="
 for i in $(seq 1 $((NODE_COUNT - 1))); do
     IP="${ALL_IPS[$i]}"
-    printf "  Copying to $SSH_USER@$IP:~/ (Node $i)... "
-    eval "$SCP_PREFIX -q \"$BINARY\" \"$CONFIG\" \"$SSH_USER@$IP:~/\" 2>/dev/null"
+    printf "  Copying to $SSH_USER@$IP:$REMOTE_WORKSPACE/ (Node $i)... "
+    
+    # Ensure remote directory exists
+    eval "$SSH_PREFIX \"$SSH_USER@$IP\" \"mkdir -p $REMOTE_WORKSPACE\" >/dev/null 2>&1"
+    
+    eval "$SCP_PREFIX -q \"$BINARY\" \"$CONFIG\" \"$SSH_USER@$IP:$REMOTE_WORKSPACE/\" 2>/dev/null"
     if [ $? -eq 0 ]; then
         echo "OK"
     else
@@ -173,7 +179,10 @@ for i in $(seq 1 $((NODE_COUNT - 1))); do
     LOG_FILE="Node_${i}_Slave_${IP}_${PORT}.log"
 
     echo "  Starting Node $i on $IP:$PORT... (Logging to $LOG_FILE)"
-    open_terminal "NODE $i ($IP:$PORT via SSH)" "eval \"$SSH_PREFIX -t $SSH_USER@$IP '~/lab04 $N $i remote $NODE_COUNT $STRATEGY'\"" "$LOG_FILE"
+    
+    # Payload tells the remote PC to create its own logs folder, run lab04, and duplicate the stdout to a remote log file.
+    REMOTE_CMD="mkdir -p $REMOTE_WORKSPACE/logs && cd $REMOTE_WORKSPACE && ./lab04 $N $i remote $NODE_COUNT $STRATEGY | tee $REMOTE_WORKSPACE/logs/$LOG_FILE"
+    open_terminal "NODE $i ($IP:$PORT via SSH)" "eval \"$SSH_PREFIX -t $SSH_USER@$IP '$REMOTE_CMD'\"" "$LOG_FILE"
 done
 
 echo "  Waiting for slaves to start..."
