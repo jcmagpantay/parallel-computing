@@ -8,7 +8,7 @@
 #   Line 2: slave_ip slave_port     (node 2)
 #   ...
 #
-# Usage: bash run_remote.sh <n> [strategy] [ssh_user] [ssh_key]
+# Usage: bash run_remote.sh <n> [strategy] [ssh_user] [ssh_password]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.remote.txt"
@@ -53,15 +53,27 @@ TMPEOF
 N=${1:-12}
 STRATEGY=${2:-tree}     # 'linear' or 'tree'
 SSH_USER=${3:-$(whoami)}
-SSH_KEY=${4:-"$HOME/.ssh/id_ed25519_local"}
+SSH_PASS=${4:-"useruser"} # Defaults to lab password
 OS_NAME=$(uname)
+
+# Check for sshpass utility
+if ! command -v sshpass &> /dev/null; then
+    echo "WARNING: 'sshpass' is not installed."
+    echo "You will have to manually type the password for EVERY window."
+    echo "To fix this, install it via: sudo apt-get install sshpass"
+    echo ""
+    SSH_PREFIX="ssh -o StrictHostKeyChecking=no"
+    SCP_PREFIX="scp -o StrictHostKeyChecking=no"
+else
+    SSH_PREFIX="sshpass -p '$SSH_PASS' ssh -o StrictHostKeyChecking=no"
+    SCP_PREFIX="sshpass -p '$SSH_PASS' scp -o StrictHostKeyChecking=no"
+fi
 
 echo "============================================"
 echo "  RA04 Remote Mode"
 echo "  Matrix: ${N}x${N} | User: $SSH_USER"
 echo "  Strategy: $STRATEGY"
 echo "  Config: $CONFIG"
-echo "  SSH Key: $SSH_KEY"
 echo "  OS: $OS_NAME"
 echo "============================================"
 echo ""
@@ -115,10 +127,13 @@ ALL_OK=true
 for i in $(seq 1 $((NODE_COUNT - 1))); do
     IP="${ALL_IPS[$i]}"
     printf "  Testing SSH to $IP (Node $i)... "
-    ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$IP" "echo OK" 2>/dev/null
+    # We remove BatchMode because we're using passwords now
+    eval "$SSH_PREFIX -o ConnectTimeout=5 \"$SSH_USER@$IP\" \"echo OK\" >/dev/null 2>&1"
     if [ $? -ne 0 ]; then
-        echo "FAILED"
+        echo "FAILED (Check password or IP)"
         ALL_OK=false
+    else
+        echo "OK"
     fi
 done
 
@@ -135,7 +150,7 @@ echo "=== Step 4: Deploying to slaves ==="
 for i in $(seq 1 $((NODE_COUNT - 1))); do
     IP="${ALL_IPS[$i]}"
     printf "  Copying to $SSH_USER@$IP:~/ (Node $i)... "
-    scp -i "$SSH_KEY" -o BatchMode=yes -q "$BINARY" "$CONFIG" "$SSH_USER@$IP:~/" 2>/dev/null
+    eval "$SCP_PREFIX -q \"$BINARY\" \"$CONFIG\" \"$SSH_USER@$IP:~/\" 2>/dev/null"
     if [ $? -eq 0 ]; then
         echo "OK"
     else
@@ -158,7 +173,7 @@ for i in $(seq 1 $((NODE_COUNT - 1))); do
     LOG_FILE="Node_${i}_Slave_${IP}_${PORT}.log"
 
     echo "  Starting Node $i on $IP:$PORT... (Logging to $LOG_FILE)"
-    open_terminal "NODE $i ($IP:$PORT via SSH)" "ssh -t -i $SSH_KEY $SSH_USER@$IP '~/lab04 $N $i remote $NODE_COUNT $STRATEGY'" "$LOG_FILE"
+    open_terminal "NODE $i ($IP:$PORT via SSH)" "eval \"$SSH_PREFIX -t $SSH_USER@$IP '~/lab04 $N $i remote $NODE_COUNT $STRATEGY'\"" "$LOG_FILE"
 done
 
 echo "  Waiting for slaves to start..."
