@@ -16,9 +16,7 @@ typedef struct {
     int  port;
 } NodeEntry;
 
-// =====================================================================
 // Reliable send: loops until all bytes are sent
-// =====================================================================
 int send_all(int sock, const void *buf, size_t len) {
     size_t total_sent = 0;
     const char *ptr = (const char *)buf;
@@ -33,9 +31,7 @@ int send_all(int sock, const void *buf, size_t len) {
     return 0;
 }
 
-// =====================================================================
 // Reliable recv: loops until all bytes are received
-// =====================================================================
 int recv_all(int sock, void *buf, size_t len) {
     size_t total_recv = 0;
     char *ptr = (char *)buf;
@@ -50,9 +46,8 @@ int recv_all(int sock, void *buf, size_t len) {
     return 0;
 }
 
-// =====================================================================
+
 // Setup a listening socket on the given port
-// =====================================================================
 int setup_server(int port) {
     int listening_socket;
     struct sockaddr_in address;
@@ -70,7 +65,6 @@ int setup_server(int port) {
 #ifdef SO_REUSEPORT
     if (setsockopt(listening_socket, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt))) {
         perror("setsockopt SO_REUSEPORT failed");
-        // Non-fatal, just log it
     }
 #endif
 
@@ -91,9 +85,8 @@ int setup_server(int port) {
     return listening_socket;
 }
 
-// =====================================================================
+
 // Connect to a target IP:port with retries
-// =====================================================================
 int connect_to(const char *ip, int port) {
     int sock_fd;
     struct sockaddr_in serv_addr;
@@ -126,10 +119,8 @@ int connect_to(const char *ip, int port) {
     return sock_fd;
 }
 
-// =====================================================================
 // Read config for LOCAL mode
 // Format: "ip base_port" — ports auto-increment per node_id
-// =====================================================================
 int read_config_local(const char *filename, NodeEntry nodes[], int total_nodes) {
     FILE *f = fopen(filename, "r");
     if (!f) { perror("Cannot open config.local.txt"); return -1; }
@@ -150,10 +141,8 @@ int read_config_local(const char *filename, NodeEntry nodes[], int total_nodes) 
     return total_nodes;
 }
 
-// =====================================================================
 // Read config for REMOTE mode
 // Format: each line is "ip port" — line 0 = node 0 (master), etc.
-// =====================================================================
 int read_config_remote(const char *filename, NodeEntry nodes[], int max_nodes) {
     FILE *f = fopen(filename, "r");
     if (!f) { perror("Cannot open config.remote.txt"); return -1; }
@@ -167,9 +156,7 @@ int read_config_remote(const char *filename, NodeEntry nodes[], int max_nodes) {
     return count;
 }
 
-// =====================================================================
 // Matrix utilities
-// =====================================================================
 int** create_matrix(int n) {
     int **M = (int **)malloc(n * sizeof(int *));
     for (int i = 0; i < n; i++) {
@@ -203,10 +190,8 @@ void free_matrix(int **M, int rows) {
     free(M);
 }
 
-// =====================================================================
 // Compute how many rows a subtree of nodes should own
 // Uses fair distribution: node i gets (n/total) + (i < n%total ? 1 : 0)
-// =====================================================================
 int rows_for_subtree(int start_node, int subtree_size, int n, int total_nodes) {
     int total = 0;
     for (int i = start_node; i < start_node + subtree_size && i < total_nodes; i++) {
@@ -229,10 +214,9 @@ int start_row_for_node(int node_id, int n, int total_nodes) {
     return start;
 }
 
-// =====================================================================
 // Send a submatrix over a socket
-// Wire format: [uint32 rows][uint32 cols][row-major int data]
-// =====================================================================
+// Sends first the number of rows and columns
+// Sends the rest of the submatrix per row
 void send_submatrix(int sock, int **data, int start_row, int num_rows, int cols) {
     uint32_t nr = htonl((uint32_t)num_rows);
     uint32_t nc = htonl((uint32_t)cols);
@@ -249,9 +233,8 @@ void send_submatrix(int sock, int **data, int start_row, int num_rows, int cols)
     }
 }
 
-// =====================================================================
-// Receive a submatrix from a socket
-// =====================================================================
+// Helper function
+// Receive a submatrix from socket
 int** recv_submatrix(int sock, int *out_rows, int *out_cols) {
     uint32_t nr, nc;
     recv_all(sock, &nr, sizeof(nr));
@@ -475,9 +458,7 @@ void scatter_tree(int my_id, int total_nodes, int n,
     *out_cols = cols;
 }
 
-// =====================================================================
 // MAIN
-// =====================================================================
 int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
 
@@ -522,7 +503,7 @@ int main(int argc, char *argv[]) {
 
     int use_tree = (strcmp(strategy, "tree") == 0);
 
-    // --- Read config to learn all node addresses ---
+    // Read config to learn all node addresses
     NodeEntry nodes[MAX_NODES];
     int num_nodes;
 
@@ -531,7 +512,7 @@ int main(int argc, char *argv[]) {
     } else {
         num_nodes = read_config_remote("config.remote.txt", nodes, MAX_NODES);
 
-        // SSH proof for slaves running in remote mode
+        // Debugging if SSH works
         if (my_id != 0) {
             const char *ssh_conn = getenv("SSH_CONNECTION");
             const char *ssh_client = getenv("SSH_CLIENT");
