@@ -174,10 +174,9 @@ for i in $(seq 1 $((NODE_COUNT - 1))); do
     # Note: Local logging will be skipped for slaves since the buffer lives remotely.
     echo "  Spawning GUI window for Node $i on $IP:$PORT... (Check remote monitor!)"
     
-    # 1. Use sudo to locate the active X11 Cookie on the target PC
-    # 2. Grant the SSH user explicit permission to draw on the active screen via xhost
-    # 3. Spawn the gnome-terminal cleanly attached to the SSH user's D-Bus
-    SSH_CMD="echo \"$SSH_PASS\" | sudo -S bash -c \"export DISPLAY=:0; export XAUTHORITY=\\\$(ls /run/user/*/gdm/Xauthority /run/user/*/Xauthority /home/*/.Xauthority 2>/dev/null | head -n 1); xhost +SI:localuser:$SSH_USER 2>/dev/null\"; export DISPLAY=:0; export XAUTHORITY=~/.Xauthority; export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u); gnome-terminal --title=\"NODE $i\" -- bash -c \"~/lab04 $N $i remote $NODE_COUNT $STRATEGY; echo \\\"\\\"; read -p \\\"Press Enter to close...\\\"\""
+    # 1. We dynamically locate the X11/Wayland Magic Cookie (Xauthority) based on standard Ubuntu paths.
+    # 2. We use `dbus-run-session` to spawn a temporary isolated D-Bus proxy, completely bypassing the "Connection refused" gnome-terminal error!
+    SSH_CMD="export DISPLAY=:0; export XAUTHORITY=\\\$(ls /run/user/\\\$(id -u)/gdm/Xauthority /run/user/\\\$(id -u)/Xauthority /home/\\\$USER/.Xauthority 2>/dev/null | head -n 1); dbus-run-session gnome-terminal --title=\"NODE $i\" -- bash -c \"~/lab04 $N $i remote $NODE_COUNT $STRATEGY; echo \\\"\\\"; read -p \\\"Press Enter to close...\\\"\""
     
     eval "$SSH_PREFIX $SSH_USER@$IP '$SSH_CMD'" &
 done
