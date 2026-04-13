@@ -1,3 +1,9 @@
+#ifdef __linux__
+#define _GNU_SOURCE
+#include <sched.h>
+#include <pthread.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -371,7 +377,7 @@ void scatter_tree(int my_id, int total_nodes, int n,
     { int tmp = hp2; while (tmp > 1) { total_rounds++; tmp /= 2; } }
 
     printf("┌─────────────────────────────────────────┐\n");
-    printf("│  TREE SCATTER: %d rounds (log₂%d)         \n", total_rounds, total_nodes);
+    printf("   TREE SCATTER: %d rounds (log₂%d)         \n", total_rounds, total_nodes);
     printf("└─────────────────────────────────────────┘\n\n");
 
     for (int stride = hp2 / 2; stride > 0; stride /= 2) {
@@ -458,18 +464,43 @@ void scatter_tree(int my_id, int total_nodes, int n,
     *out_cols = cols;
 }
 
+// =====================================================================
+// Set Thread/Process CPU Affinity (Linux Only)
+// macOS XNU Kernel does not support hard core pinning.
+// =====================================================================
+void pin_to_core(int core_id) {
+#ifdef __linux__
+    int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (num_cores > 0) {
+        int target_core = core_id % num_cores;
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(target_core, &cpuset);
+        if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) == 0) {
+            printf("[Binding] Process firmly bound to logical CPU Core %d\n", target_core);
+        } else {
+            perror("[Binding] sched_setaffinity failed");
+        }
+    }
+#else
+    // macOS does not support sched_setaffinity. Fails silently on local Macs.
+    (void)core_id; // prevent unused warning
+#endif
+}
+
 // MAIN
 int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
 
-    // Usage: ./lab04 <n> <node_id> <mode> <total_nodes> <strategy>
+    // Usage: ./lab04 <n> <node_id> <mode> <total_nodes> <strategy> [affine]
     if (argc < 6) {
-        printf("Usage: %s <n> <node_id> <mode> <total_nodes> <strategy>\n\n", argv[0]);
+        printf("Usage: %s <n> <node_id> <mode> <total_nodes> <strategy> [affine]\n\n", argv[0]);
         printf("  n           = size of the square matrix (n x n)\n");
         printf("  node_id     = node identifier (0 = master, 1+ = slave)\n");
         printf("  mode        = 'local' or 'remote'\n");
         printf("  total_nodes = total number of participating nodes\n");
-        printf("  strategy    = 'linear' (O(n)) or 'tree' (O(log n))\n\n");
+        printf("  strategy    = 'linear' (O(n)) or 'tree' (O(log n))\n");
+        printf("  affine      = 'affine' to pin nodes to cores (Linux only, optional)\n\n");
         printf("Examples (4 nodes, 12x12 matrix):\n");
         printf("  Master:  %s 12 0 local 4 tree\n", argv[0]);
         printf("  Slave 1: %s 12 1 local 4 tree\n", argv[0]);
@@ -502,6 +533,12 @@ int main(int argc, char *argv[]) {
     }
 
     int use_tree = (strcmp(strategy, "tree") == 0);
+    int use_affine = (argc >= 7 && strcmp(argv[6], "affine") == 0);
+
+    // --- Apply Core Affinity ---
+    if (use_affine && strcmp(mode, "local") == 0) {
+        pin_to_core(my_id);
+    }
 
     // Read config to learn all node addresses
     NodeEntry nodes[MAX_NODES];

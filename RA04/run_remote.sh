@@ -18,14 +18,20 @@ BINARY="$SCRIPT_DIR/lab04"
 open_terminal() {
     local title="$1"
     local cmd="$2"
+    local log_file="$3"
 
     local tmp_script
     tmp_script=$(mktemp /tmp/ra04_XXXXXX)
     cat > "$tmp_script" << TMPEOF
 #!/bin/bash
 echo -ne "\033]0;${title}\007"
-echo "=== $title ==="
-$cmd
+echo "=== ${title} ==="
+cd "$SCRIPT_DIR"
+if [ -n "${log_file}" ]; then
+    ${cmd} | tee "logs/${log_file}"
+else
+    ${cmd}
+fi
 echo ""
 echo "Press Enter to close..."
 read
@@ -140,14 +146,19 @@ done
 echo "Deployment complete."
 echo ""
 
+# Setup logs folder locally
+rm -rf "$SCRIPT_DIR/logs"
+mkdir -p "$SCRIPT_DIR/logs"
+
 # --- Launch slave nodes via SSH ---
 echo "=== Step 5: Launching slaves ==="
 for i in $(seq 1 $((NODE_COUNT - 1))); do
     IP="${ALL_IPS[$i]}"
     PORT="${ALL_PORTS[$i]}"
+    LOG_FILE="Node_${i}_Slave_${IP}_${PORT}.log"
 
-    echo "  Starting Node $i on $IP:$PORT..."
-    open_terminal "NODE $i ($IP:$PORT via SSH)" "ssh -t -i $SSH_KEY $SSH_USER@$IP '~/lab04 $N $i remote $NODE_COUNT $STRATEGY'"
+    echo "  Starting Node $i on $IP:$PORT... (Logging to $LOG_FILE)"
+    open_terminal "NODE $i ($IP:$PORT via SSH)" "ssh -t -i $SSH_KEY $SSH_USER@$IP '~/lab04 $N $i remote $NODE_COUNT $STRATEGY'" "$LOG_FILE"
 done
 
 echo "  Waiting for slaves to start..."
@@ -156,7 +167,8 @@ echo ""
 
 # --- Launch master locally ---
 echo "=== Step 6: Launching master ==="
-open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "cd \"$SCRIPT_DIR\" && ./lab04 $N 0 remote $NODE_COUNT $STRATEGY"
+LOG_FILE="Node_0_Master_${MASTER_IP}_${MASTER_PORT}.log"
+open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab04 $N 0 remote $NODE_COUNT $STRATEGY" "$LOG_FILE"
 
 echo ""
 echo "============================================"
