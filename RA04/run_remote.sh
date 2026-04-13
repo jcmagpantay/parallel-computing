@@ -8,7 +8,7 @@
 #   Line 2: slave_ip slave_port     (node 2)
 #   ...
 #
-# Usage: bash run_remote.sh <n> [ssh_user] [ssh_key]
+# Usage: bash run_remote.sh <n> [strategy] [ssh_user] [ssh_key]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.remote.txt"
@@ -23,6 +23,7 @@ open_terminal() {
     tmp_script=$(mktemp /tmp/ra04_XXXXXX)
     cat > "$tmp_script" << TMPEOF
 #!/bin/bash
+echo -ne "\033]0;${title}\007"
 echo "=== $title ==="
 $cmd
 echo ""
@@ -44,13 +45,15 @@ TMPEOF
 
 # --- Parse arguments ---
 N=${1:-12}
-SSH_USER=${2:-$(whoami)}
-SSH_KEY=${3:-"$HOME/.ssh/id_ed25519_local"}
+STRATEGY=${2:-tree}     # 'linear' or 'tree'
+SSH_USER=${3:-$(whoami)}
+SSH_KEY=${4:-"$HOME/.ssh/id_ed25519_local"}
 OS_NAME=$(uname)
 
 echo "============================================"
-echo "  RA04 Remote Mode (Binomial Tree Scatter)"
+echo "  RA04 Remote Mode"
 echo "  Matrix: ${N}x${N} | User: $SSH_USER"
+echo "  Strategy: $STRATEGY"
 echo "  Config: $CONFIG"
 echo "  SSH Key: $SSH_KEY"
 echo "  OS: $OS_NAME"
@@ -144,7 +147,7 @@ for i in $(seq 1 $((NODE_COUNT - 1))); do
     PORT="${ALL_PORTS[$i]}"
 
     echo "  Starting Node $i on $IP:$PORT..."
-    open_terminal "NODE $i ($IP:$PORT via SSH)" "ssh -t -i $SSH_KEY $SSH_USER@$IP '~/lab04 $N $i remote $NODE_COUNT'"
+    open_terminal "NODE $i ($IP:$PORT via SSH)" "ssh -t -i $SSH_KEY $SSH_USER@$IP '~/lab04 $N $i remote $NODE_COUNT $STRATEGY'"
 done
 
 echo "  Waiting for slaves to start..."
@@ -153,12 +156,12 @@ echo ""
 
 # --- Launch master locally ---
 echo "=== Step 6: Launching master ==="
-open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "cd \"$SCRIPT_DIR\" && ./lab04 $N 0 remote $NODE_COUNT"
+open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "cd \"$SCRIPT_DIR\" && ./lab04 $N 0 remote $NODE_COUNT $STRATEGY"
 
 echo ""
 echo "============================================"
 echo "  All $NODE_COUNT terminals launched!"
-echo "  Strategy: Binomial Tree Scatter O(log n)"
+echo "  Strategy: $STRATEGY"
 echo "  Master: $MASTER_IP:$MASTER_PORT"
 echo "  Slaves: $SLAVE_COUNT instances"
 echo "============================================"

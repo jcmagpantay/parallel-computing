@@ -14,6 +14,7 @@ open_terminal() {
     tmp_script=$(mktemp /tmp/ra04_XXXXXX)
     cat > "$tmp_script" << TMPEOF
 #!/bin/bash
+echo -ne "\033]0;${title}\007"
 echo "=== $title ==="
 cd "$SCRIPT_DIR"
 $cmd
@@ -41,18 +42,19 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-N=1024             # Matrix size (should be divisible by TOTAL_NODES)
-TOTAL_NODES=9    # Total participating nodes (1 master + 3 slaves)
+N=${1:-1024}            # Matrix size
+TOTAL_NODES=${2:-9}      # Total participating nodes (1 master + N-1 slaves)
+STRATEGY=${3:-tree}      # 'linear' (O(n)) or 'tree' (O(log n))
 OS_NAME=$(uname)
 
 echo "Detected OS: $OS_NAME"
-echo "Matrix: ${N}x${N} | Nodes: $TOTAL_NODES"
+echo "Matrix: ${N}x${N} | Nodes: $TOTAL_NODES | Strategy: $STRATEGY"
 echo ""
 
 # Launch slave nodes first (nodes 1..TOTAL_NODES-1)
 echo "=== Launching $((TOTAL_NODES - 1)) slave nodes ==="
 for i in $(seq 1 $((TOTAL_NODES - 1))); do
-    open_terminal "NODE $i (Slave)" "./lab04 $N $i local $TOTAL_NODES"
+    open_terminal "NODE $i (Slave)" "./lab04 $N $i local $TOTAL_NODES $STRATEGY"
     echo "  Opened terminal for Node $i"
 done
 
@@ -62,7 +64,7 @@ sleep 2
 # Launch master node (node 0)
 echo ""
 echo "=== Launching master node ==="
-open_terminal "NODE 0 (Master)" "./lab04 $N 0 local $TOTAL_NODES"
+open_terminal "NODE 0 (Master)" "./lab04 $N 0 local $TOTAL_NODES $STRATEGY"
 
 echo ""
 echo "=== All $TOTAL_NODES terminals launched! ==="

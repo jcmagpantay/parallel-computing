@@ -67,6 +67,12 @@ int setup_server(int port) {
         perror("setsockopt SO_REUSEADDR failed");
         exit(EXIT_FAILURE);
     }
+#ifdef SO_REUSEPORT
+    if (setsockopt(listening_socket, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt))) {
+        perror("setsockopt SO_REUSEPORT failed");
+        // Non-fatal, just log it
+    }
+#endif
 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -176,7 +182,13 @@ int** create_matrix(int n) {
 }
 
 void print_matrix(int **M, int rows, int cols) {
+    // Only print if matrix is reasonably small
+    if (rows > 20 || cols > 20) {
+        printf("  [%d x %d matrix — too large to display]\n", rows, cols);
+        return;
+    }
     for (int i = 0; i < rows; i++) {
+        printf("  ");
         for (int j = 0; j < cols; j++) {
             printf("%4d", M[i][j]);
             if (j < cols - 1) printf(" ");
@@ -203,9 +215,23 @@ int rows_for_subtree(int start_node, int subtree_size, int n, int total_nodes) {
     return total;
 }
 
+// Rows assigned to a single node
+int rows_for_node(int node_id, int n, int total_nodes) {
+    return (n / total_nodes) + (node_id < (n % total_nodes) ? 1 : 0);
+}
+
+// Starting row index for a node
+int start_row_for_node(int node_id, int n, int total_nodes) {
+    int start = 0;
+    for (int i = 0; i < node_id; i++) {
+        start += rows_for_node(i, n, total_nodes);
+    }
+    return start;
+}
+
 // =====================================================================
-// Send a submatrix (rows [start_row, start_row+num_rows)) over a socket
-// Wire format: [uint32 rows][uint32 cols][row-major int data in network order]
+// Send a submatrix over a socket
+// Wire format: [uint32 rows][uint32 cols][row-major int data]
 // =====================================================================
 void send_submatrix(int sock, int **data, int start_row, int num_rows, int cols) {
     uint32_t nr = htonl((uint32_t)num_rows);
@@ -250,23 +276,224 @@ int** recv_submatrix(int sock, int *out_rows, int *out_cols) {
 }
 
 // =====================================================================
+// STRATEGY 1: LINEAR SCATTER — O(t) sequential distribution
+//
+// Master sends each slave's submatrix one-by-one.
+// Simple but slow: total time proportional to number of slaves.
+// =====================================================================
+void scatter_linear(int my_id, int total_nodes, int n,
+                    int **full_matrix, int listening_socket,
+                    NodeEntry nodes[],
+                    int ***out_data, int *out_rows, int *out_cols,
+                    struct timespec *time_before, int *time_started) {
+    int cols = n;
+
+    if (my_id == 0) {
+        // ---- MASTER: send to each slave sequentially ----
+        printf("┌─────────────────────────────────────────┐\n");
+        printf("│  LINEAR SCATTER: Sending to %d slaves    │\n", total_nodes - 1);
+        printf("└─────────────────────────────────────────┘\n\n");
+
+        for (int target = 1; target < total_nodes; target++) {
+            int t_rows = rows_for_node(target, n, total_nodes);
+            int t_start = start_row_for_node(target, n, total_nodes);
+
+            printf("──── Step %d/%d ────────────────────────────\n", target, total_nodes - 1);
+            printf("  Node 0 ──→ Node %d\n", target);
+            printf("  Sending rows [%d..%d] (%d rows x %d cols)\n",
+                   t_start, t_start + t_rows - 1, t_rows, cols);
+            print_matrix(&full_matrix[t_start], t_rows, cols);
+            printf("\n");
+
+            int sock = connect_to(nodes[target].ip, nodes[target].port);
+            if (sock < 0) {
+                printf("  ✗ Failed to connect to Node %d!\n", target);
+                continue;
+            }
+
+            send_submatrix(sock, full_matrix, t_start, t_rows, cols);
+            close(sock);
+            printf("  ✓ Sent to Node %d at %s:%d\n\n", target, nodes[target].ip, nodes[target].port);
+        }
+
+        // Master keeps its own portion (node 0's rows)
+        int my_r = rows_for_node(0, n, total_nodes);
+        *out_data = (int **)malloc(my_r * sizeof(int *));
+        for (int r = 0; r < my_r; r++) {
+            (*out_data)[r] = (int *)malloc(cols * sizeof(int));
+            memcpy((*out_data)[r], full_matrix[r], cols * sizeof(int));
+        }
+        *out_rows = my_r;
+        *out_cols = cols;
+
+        printf("──── Master's portion ──────────────────────\n");
+        printf("  Keeping rows [0..%d] (%d rows)\n", my_r - 1, my_r);
+        print_matrix(*out_data, *out_rows, cols);
+        printf("\n");
+
+    } else {
+        // ---- SLAVE: wait for data from master ----
+        printf("  Waiting for data from Master (Node 0)...\n\n");
+
+        struct sockaddr_in addr;
+        int addrlen = sizeof(addr);
+        int conn = accept(listening_socket, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
+        if (conn < 0) { perror("Accept failed"); return; }
+
+        if (!*time_started) {
+            clock_gettime(CLOCK_MONOTONIC, time_before);
+            *time_started = 1;
+        }
+
+        *out_data = recv_submatrix(conn, out_rows, out_cols);
+        close(conn);
+
+        printf("  ✓ Received %d rows x %d cols from Node 0\n", *out_rows, *out_cols);
+        printf("\n  Received submatrix:\n");
+        print_matrix(*out_data, *out_rows, *out_cols);
+        printf("\n");
+    }
+}
+
+// =====================================================================
+// STRATEGY 2: BINOMIAL TREE SCATTER — O(log t) distribution
+//
+// At each stride, nodes with data split and forward half to a partner.
+// Each round doubles the number of nodes holding data.
+//
+// Example (4 nodes, 12 rows):
+//   Round 1 (stride=2): Node 0 → Node 2 (6 rows each)
+//   Round 2 (stride=1): Node 0 → Node 1, Node 2 → Node 3 (3 rows each)
+// =====================================================================
+void scatter_tree(int my_id, int total_nodes, int n,
+                  int **full_matrix, int listening_socket,
+                  NodeEntry nodes[],
+                  int ***out_data, int *out_rows, int *out_cols,
+                  struct timespec *time_before, int *time_started) {
+    int cols = n;
+    int has_data = 0;
+    int my_rows = 0;
+    int **my_data = NULL;
+
+    if (my_id == 0) {
+        my_data = full_matrix;
+        my_rows = n;
+        has_data = 1;
+    }
+
+    int hp2 = 1;
+    while (hp2 < total_nodes) hp2 *= 2;
+    int round = 0;
+    int total_rounds = 0;
+    { int tmp = hp2; while (tmp > 1) { total_rounds++; tmp /= 2; } }
+
+    printf("┌─────────────────────────────────────────┐\n");
+    printf("│  TREE SCATTER: %d rounds (log₂%d)         \n", total_rounds, total_nodes);
+    printf("└─────────────────────────────────────────┘\n\n");
+
+    for (int stride = hp2 / 2; stride > 0; stride /= 2) {
+        round++;
+
+        if (has_data) {
+            int target = my_id + stride;
+            if (target < total_nodes) {
+                int target_subtree_size = stride;
+                if (target + stride > total_nodes)
+                    target_subtree_size = total_nodes - target;
+                int send_rows = rows_for_subtree(target, target_subtree_size, n, total_nodes);
+                int keep_rows = my_rows - send_rows;
+
+                printf("──── Round %d/%d (stride=%d) ────────────────\n", round, total_rounds, stride);
+                printf("  Node %d ──→ Node %d\n", my_id, target);
+                printf("  Splitting: send %d rows, keep %d rows\n", send_rows, keep_rows);
+                printf("\n  Submatrix being sent to Node %d:\n", target);
+                print_matrix(&my_data[keep_rows], send_rows, cols);
+
+                int sock = connect_to(nodes[target].ip, nodes[target].port);
+                if (sock < 0) {
+                    printf("  ✗ Failed to connect to Node %d!\n", target);
+                    return;
+                }
+                send_submatrix(sock, my_data, keep_rows, send_rows, cols);
+                close(sock);
+
+                // Free sent rows, shrink
+                for (int r = keep_rows; r < my_rows; r++) {
+                    free(my_data[r]);
+                }
+                my_rows = keep_rows;
+                my_data = (int **)realloc(my_data, my_rows * sizeof(int *));
+
+                printf("\n  ✓ Sent! Now holding %d rows\n\n", my_rows);
+            }
+        } else {
+            if ((my_id % (stride * 2)) == stride) {
+                printf("──── Round %d/%d (stride=%d) ────────────────\n", round, total_rounds, stride);
+                printf("  Node %d: Waiting to receive...\n", my_id);
+
+                struct sockaddr_in addr;
+                int addrlen = sizeof(addr);
+                int conn = accept(listening_socket, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
+                if (conn < 0) { perror("Accept failed"); return; }
+
+                if (!*time_started) {
+                    clock_gettime(CLOCK_MONOTONIC, time_before);
+                    *time_started = 1;
+                }
+
+                my_data = recv_submatrix(conn, &my_rows, &cols);
+                close(conn);
+                has_data = 1;
+
+                // Determine which node sent to us
+                int parent = my_id - stride;
+                // But actually we don't know for sure, let's just say "from Node X"
+                // The parent is the node that has (my_id - stride) if that's valid
+                printf("  ✓ Received %d rows x %d cols from Node %d\n", my_rows, cols, parent >= 0 ? parent : 0);
+                printf("\n  Received submatrix:\n");
+                print_matrix(my_data, my_rows, cols);
+                printf("\n");
+            }
+        }
+    }
+
+    // For master, don't free full_matrix (caller's responsibility), copy instead
+    if (my_id == 0) {
+        // my_data is already a subset of full_matrix pointers (realloc'd)
+        // We need to make independent copies
+        int **copy = (int **)malloc(my_rows * sizeof(int *));
+        for (int r = 0; r < my_rows; r++) {
+            copy[r] = (int *)malloc(cols * sizeof(int));
+            memcpy(copy[r], my_data[r], cols * sizeof(int));
+        }
+        // Don't free my_data here — it shares pointers with full_matrix
+        *out_data = copy;
+    } else {
+        *out_data = my_data;
+    }
+    *out_rows = my_rows;
+    *out_cols = cols;
+}
+
+// =====================================================================
 // MAIN
 // =====================================================================
 int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
 
-    // Usage: ./lab04 <n> <node_id> <mode> <total_nodes>
-    if (argc < 5) {
-        printf("Usage: %s <n> <node_id> <mode> <total_nodes>\n\n", argv[0]);
+    // Usage: ./lab04 <n> <node_id> <mode> <total_nodes> <strategy>
+    if (argc < 6) {
+        printf("Usage: %s <n> <node_id> <mode> <total_nodes> <strategy>\n\n", argv[0]);
         printf("  n           = size of the square matrix (n x n)\n");
         printf("  node_id     = node identifier (0 = master, 1+ = slave)\n");
         printf("  mode        = 'local' or 'remote'\n");
-        printf("  total_nodes = total number of participating nodes\n\n");
+        printf("  total_nodes = total number of participating nodes\n");
+        printf("  strategy    = 'linear' (O(n)) or 'tree' (O(log n))\n\n");
         printf("Examples (4 nodes, 12x12 matrix):\n");
-        printf("  Master:  %s 12 0 local 4\n", argv[0]);
-        printf("  Slave 1: %s 12 1 local 4\n", argv[0]);
-        printf("  Slave 2: %s 12 2 local 4\n", argv[0]);
-        printf("  Slave 3: %s 12 3 local 4\n", argv[0]);
+        printf("  Master:  %s 12 0 local 4 tree\n", argv[0]);
+        printf("  Slave 1: %s 12 1 local 4 tree\n", argv[0]);
+        printf("  Slave 2: %s 12 2 local 4 tree\n", argv[0]);
+        printf("  Slave 3: %s 12 3 local 4 tree\n", argv[0]);
         return -1;
     }
 
@@ -274,6 +501,7 @@ int main(int argc, char *argv[]) {
     int my_id       = atoi(argv[2]);
     char *mode      = argv[3];
     int total_nodes = atoi(argv[4]);
+    char *strategy  = argv[5];
 
     if (n <= 0) {
         printf("Error: n must be a positive integer.\n");
@@ -287,6 +515,12 @@ int main(int argc, char *argv[]) {
         printf("Error: mode must be 'local' or 'remote'.\n");
         return -1;
     }
+    if (strcmp(strategy, "linear") != 0 && strcmp(strategy, "tree") != 0) {
+        printf("Error: strategy must be 'linear' or 'tree'.\n");
+        return -1;
+    }
+
+    int use_tree = (strcmp(strategy, "tree") == 0);
 
     // --- Read config to learn all node addresses ---
     NodeEntry nodes[MAX_NODES];
@@ -302,9 +536,10 @@ int main(int argc, char *argv[]) {
             const char *ssh_conn = getenv("SSH_CONNECTION");
             const char *ssh_client = getenv("SSH_CLIENT");
             if (ssh_conn) {
-                printf("[Node %d] *** SSH PROOF: SSH_CONNECTION = %s\n", my_id, ssh_conn);
-                printf("[Node %d] *** SSH PROOF: SSH_CLIENT     = %s\n", my_id,
+                printf("*** SSH PROOF: SSH_CONNECTION = %s\n", ssh_conn);
+                printf("*** SSH PROOF: SSH_CLIENT     = %s\n",
                        ssh_client ? ssh_client : "(not set)");
+                printf("\n");
             }
         }
     }
@@ -313,35 +548,35 @@ int main(int argc, char *argv[]) {
 
     int my_port = nodes[my_id].port;
 
-    printf("============================================\n");
+    // --- Banner ---
+    printf("╔════════════════════════════════════════════╗\n");
     if (my_id == 0)
-        printf("  MASTER NODE (Node 0)\n");
+        printf("║  MASTER NODE (Node 0)                      ║\n");
     else
-        printf("  SLAVE NODE (Node %d)\n", my_id);
-    printf("  Matrix: %d x %d | Port: %d\n", n, n, my_port);
-    printf("  Mode: %s | Total Nodes: %d\n", mode, total_nodes);
-    printf("  Strategy: Binomial Tree Scatter O(log n)\n");
-    printf("============================================\n\n");
+        printf("║  SLAVE NODE  (Node %-2d)                     ║\n", my_id);
+    printf("╠════════════════════════════════════════════╣\n");
+    printf("║  Matrix:   %5d x %-5d                   ║\n", n, n);
+    printf("║  Port:     %-5d                           ║\n", my_port);
+    printf("║  Mode:     %-8s                        ║\n", mode);
+    printf("║  Nodes:    %-3d                             ║\n", total_nodes);
+    printf("║  Strategy: %-8s %s     ║\n",
+           use_tree ? "TREE" : "LINEAR",
+           use_tree ? "O(log n)" : "O(n)    ");
+    printf("╚════════════════════════════════════════════╝\n\n");
 
     // --- Setup listening socket ---
     int listening_socket = setup_server(my_port);
     printf("[Node %d] Listening on port %d\n\n", my_id, my_port);
 
-    // --- Matrix data ---
-    int **my_data = NULL;
-    int my_rows = 0;
-    int cols = n;
-    int has_data = 0;
+    // --- Master creates the full matrix ---
+    int **full_matrix = NULL;
 
-    // --- Master creates the matrix ---
     if (my_id == 0) {
         srand((unsigned int)time(NULL));
-        my_data = create_matrix(n);
-        my_rows = n;
-        has_data = 1;
+        full_matrix = create_matrix(n);
 
         printf("[Node 0] Generated %d x %d matrix M:\n", n, n);
-        print_matrix(my_data, my_rows, cols);
+        print_matrix(full_matrix, n, n);
         printf("\n");
     }
 
@@ -354,115 +589,46 @@ int main(int argc, char *argv[]) {
         time_started = 1;
     }
 
-    // =================================================================
-    // BINOMIAL TREE SCATTER — O(log n) distribution
-    //
-    // At each stride, nodes that have data split their portion:
-    //   - Keep the top half (rows for my subtree)
-    //   - Send the bottom half to (my_id + stride)
-    //
-    // Nodes that don't have data yet check if they should receive.
-    // A node with id X receives at the stride where X % (2*stride) == stride.
-    //
-    // Example with 4 nodes, 12 rows:
-    //   stride=2: Node 0 sends rows 6-11 to Node 2. Keeps 0-5.
-    //   stride=1: Node 0 sends rows 3-5 to Node 1. Keeps 0-2.
-    //             Node 2 sends rows 9-11 to Node 3. Keeps 6-8.
-    //   Result: Node0=0-2, Node1=3-5, Node2=6-8, Node3=9-11
-    // =================================================================
+    // --- Run the scatter strategy ---
+    int **my_data = NULL;
+    int my_rows = 0, my_cols = 0;
 
-    int hp2 = 1;
-    while (hp2 < total_nodes) hp2 *= 2;
-
-    for (int stride = hp2 / 2; stride > 0; stride /= 2) {
-        if (has_data) {
-            int target = my_id + stride;
-            if (target < total_nodes) {
-                // Compute how many rows the target subtree needs
-                int target_subtree_size = stride;
-                if (target + stride > total_nodes)
-                    target_subtree_size = total_nodes - target;
-                int send_rows = rows_for_subtree(target, target_subtree_size, n, total_nodes);
-                int keep_rows = my_rows - send_rows;
-
-                printf("[Node %d] Stride %d: Sending %d rows to Node %d (keeping %d)\n",
-                       my_id, stride, send_rows, target, keep_rows);
-
-                // Print what we're sending
-                printf("[Node %d] Submatrix for Node %d:\n", my_id, target);
-                print_matrix(&my_data[keep_rows], send_rows, cols);
-
-                // Connect to target and send the bottom half
-                int sock = connect_to(nodes[target].ip, nodes[target].port);
-                if (sock < 0) {
-                    printf("[Node %d] ERROR: Failed to connect to Node %d!\n", my_id, target);
-                    return -1;
-                }
-                send_submatrix(sock, my_data, keep_rows, send_rows, cols);
-                close(sock);
-
-                // Free the sent rows and shrink
-                for (int r = keep_rows; r < my_rows; r++) {
-                    free(my_data[r]);
-                }
-                my_rows = keep_rows;
-                my_data = (int **)realloc(my_data, my_rows * sizeof(int *));
-
-                printf("[Node %d] Now holding %d rows\n\n", my_id, my_rows);
-            }
-        } else {
-            // Check if I should receive in this round
-            // Node X receives when X % (2*stride) == stride
-            if ((my_id % (stride * 2)) == stride) {
-                printf("[Node %d] Stride %d: Waiting to receive from parent...\n", my_id, stride);
-
-                struct sockaddr_in addr;
-                int addrlen = sizeof(addr);
-                int conn = accept(listening_socket, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
-                if (conn < 0) { perror("Accept failed"); return -1; }
-
-                // Start timing for slaves when data first arrives
-                if (!time_started) {
-                    clock_gettime(CLOCK_MONOTONIC, &time_before);
-                    time_started = 1;
-                }
-
-                my_data = recv_submatrix(conn, &my_rows, &cols);
-                close(conn);
-                has_data = 1;
-
-                printf("[Node %d] Received %d rows x %d cols\n\n", my_id, my_rows, cols);
-            }
-        }
-
-        // Brief pause between rounds for synchronization
-        usleep(200000); // 200ms
+    if (use_tree) {
+        scatter_tree(my_id, total_nodes, n, full_matrix, listening_socket,
+                     nodes, &my_data, &my_rows, &my_cols,
+                     &time_before, &time_started);
+    } else {
+        scatter_linear(my_id, total_nodes, n, full_matrix, listening_socket,
+                       nodes, &my_data, &my_rows, &my_cols,
+                       &time_before, &time_started);
     }
 
     // =================================================================
-    // POST-SCATTER: Print results, acks, timing
+    // POST-SCATTER: Final results, acks, timing
     // =================================================================
 
-    printf("[Node %d] === Final submatrix (%d rows x %d cols) ===\n", my_id, my_rows, cols);
-    print_matrix(my_data, my_rows, cols);
+    printf("╔════════════════════════════════════════════╗\n");
+    printf("║  Node %-2d — Final Submatrix                 ║\n", my_id);
+    printf("║  %d rows x %d cols                           \n", my_rows, my_cols);
+    printf("╚════════════════════════════════════════════╝\n");
+    print_matrix(my_data, my_rows, my_cols);
     printf("\n");
 
     // Slaves send "ack" to master
     if (my_id != 0) {
-        printf("[Node %d] Sending ack to Master (Node 0) at %s:%d...\n",
+        printf("[Node %d] Sending ack to Master (Node 0) at %s:%d\n",
                my_id, nodes[0].ip, nodes[0].port);
         int sock = connect_to(nodes[0].ip, nodes[0].port);
         if (sock >= 0) {
             send_all(sock, "ack", 3);
             close(sock);
-            printf("[Node %d] Ack sent.\n", my_id);
+            printf("[Node %d] ✓ Ack sent.\n\n", my_id);
         }
 
-        // Record time_after for slave (after sending ack)
         clock_gettime(CLOCK_MONOTONIC, &time_after);
     }
 
-    // Master collects acks from all slaves
+    // Master collects acks
     if (my_id == 0) {
         printf("[Node 0] Waiting for acks from %d slaves...\n", total_nodes - 1);
         for (int i = 0; i < total_nodes - 1; i++) {
@@ -474,21 +640,29 @@ int main(int argc, char *argv[]) {
             char ack_buf[16] = {0};
             recv_all(conn, ack_buf, 3);
             close(conn);
-            printf("[Node 0] Received ack %d/%d\n", i + 1, total_nodes - 1);
+            printf("  ✓ Ack %d/%d received\n", i + 1, total_nodes - 1);
         }
 
-        // Record time_after for master (after all acks)
         clock_gettime(CLOCK_MONOTONIC, &time_after);
-        printf("[Node 0] All %d slaves acknowledged.\n\n", total_nodes - 1);
+        printf("\n[Node 0] All %d slaves acknowledged.\n\n", total_nodes - 1);
     }
 
-    // Print elapsed time
+    // --- Print elapsed time ---
     double time_elapsed = (time_after.tv_sec - time_before.tv_sec) +
                           (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
-    printf("[Node %d] time_elapsed = %f sec\n", my_id, time_elapsed);
+
+    printf("╔════════════════════════════════════════════╗\n");
+    printf("║  Node %-2d — RESULTS                         ║\n", my_id);
+    printf("╠════════════════════════════════════════════╣\n");
+    printf("║  Strategy:     %-8s %s    ║\n",
+           use_tree ? "TREE" : "LINEAR",
+           use_tree ? "O(log n)" : "O(n)    ");
+    printf("║  time_elapsed: %.6f sec              ║\n", time_elapsed);
+    printf("╚════════════════════════════════════════════╝\n");
 
     // Cleanup
     free_matrix(my_data, my_rows);
+    if (my_id == 0 && full_matrix) free_matrix(full_matrix, n);
     close(listening_socket);
     printf("[Node %d] Shutting down.\n", my_id);
 
