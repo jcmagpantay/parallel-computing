@@ -547,7 +547,7 @@ int main(int argc, char *argv[]) {
     if (strcmp(mode, "local") == 0) {
         num_nodes = read_config_local("config.local.txt", nodes, total_nodes);
     } else {
-        num_nodes = read_config_remote("config.remote.txt", nodes, MAX_NODES);
+        num_nodes = read_config_remote("config.generated.txt", nodes, MAX_NODES);
 
         // Debugging if SSH works
         if (my_id != 0) {

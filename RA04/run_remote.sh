@@ -1,17 +1,15 @@
 #!/bin/bash
 # RA04 Remote Mode: Binomial Tree Scatter — Dynamic SSH deployment
-# Auto-detects OS: macOS (Terminal.app) or Linux (gnome-terminal)
-#
-# Config format (config.hosts.txt):
-#   Line 0: master_ip master_base_port   (PC 0)
-#   Line 1: slave_ip slave_base_port     (PC 1)
-#   Line 2: slave_ip slave_base_port     (PC 2)
+# Config format (config.remote.txt):
+#   Line 0: master_ip     (PC 0)
+#   Line 1: slave_ip      (PC 1)
+#   Line 2: slave_ip      (PC 2)
 #
 # Usage: bash run_remote.sh <matrix_size> <slaves> [strategy] [ssh_user] [ssh_password]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HOSTS_FILE="$SCRIPT_DIR/config.hosts.txt"
 CONFIG="$SCRIPT_DIR/config.remote.txt"
+GENERATED_CONFIG="$SCRIPT_DIR/config.generated.txt"
 BINARY="$SCRIPT_DIR/lab04"
 
 # --- Terminal launcher (OS-agnostic) ---
@@ -58,6 +56,7 @@ SSH_USER=${4:-$(whoami)}
 SSH_PASS=${5:-"useruser"} # Defaults to lab password
 OS_NAME=$(uname)
 
+BASE_PORT=12000
 REMOTE_WORKSPACE="~/Documents/jcmagpantay-remote"
 
 # Check for sshpass utility
@@ -94,30 +93,25 @@ echo ""
 # --- Read Hardware config ---
 echo "=== Step 2: Preparing Hardware Topology ==="
 
-# Auto-migrate config.remote.txt to config.hosts.txt to preserve physical IPs
-if [ ! -f "$HOSTS_FILE" ]; then
-    if [ -f "$CONFIG" ]; then
-        echo "  Migrating config.remote.txt -> config.hosts.txt (Base HW IPs)"
-        mv "$CONFIG" "$HOSTS_FILE"
-    else
-        echo "ERROR: $HOSTS_FILE not found!"
-        exit 1
-    fi
+if [ ! -f "$CONFIG" ]; then
+    echo "ERROR: $CONFIG not found!"
+    exit 1
 fi
 
 HW_IPS=()
 HW_PORTS=()
 HW_COUNT=0
 
-while IFS=' ' read -r ip port || [ -n "$ip" ]; do
+# Read only the IP from each line. Hardcode port dynamically.
+while IFS=' ' read -r ip remainder || [ -n "$ip" ]; do
     [ -z "$ip" ] && continue
     HW_IPS+=("$ip")
-    HW_PORTS+=("$port")
+    HW_PORTS+=("$BASE_PORT")
     HW_COUNT=$((HW_COUNT + 1))
-done < "$HOSTS_FILE"
+done < "$CONFIG"
 
 if [ "$HW_COUNT" -lt 2 ]; then
-    echo "ERROR: Need at least 2 physical PCs (1 master + 1 slave) in $HOSTS_FILE!"
+    echo "ERROR: Need at least 2 physical PCs (1 master + 1 slave) in $CONFIG!"
     exit 1
 fi
 
@@ -125,14 +119,14 @@ SLAVE_HW_COUNT=$((HW_COUNT - 1))
 echo "  Detected $HW_COUNT Physical Hardware PCs ($SLAVE_HW_COUNT available for slaves)"
 echo ""
 
-# --- Generate logical mapping config.remote.txt ---
+# --- Generate logical mapping config.generated.txt ---
 echo "=== Step 3: Multiplexing Nodes onto Hardware ==="
-rm -f "$CONFIG"
+rm -f "$GENERATED_CONFIG"
 ALL_IPS=()
 ALL_PORTS=()
 
 # Route Node 0 to PC 0 (Master)
-echo "${HW_IPS[0]} ${HW_PORTS[0]}" >> "$CONFIG"
+echo "${HW_IPS[0]} ${HW_PORTS[0]}" >> "$GENERATED_CONFIG"
 ALL_IPS[0]="${HW_IPS[0]}"
 ALL_PORTS[0]="${HW_PORTS[0]}"
 echo "  Node 0 -> HW Master (${HW_IPS[0]}:${HW_PORTS[0]})"
@@ -146,14 +140,14 @@ for i in $(seq 1 $SLAVES); do
     # Increment port to avoid binding conflicts when many nodes run on 1 physical PC
     target_port=$((HW_PORTS[$PC_INDEX] + i))
     
-    echo "$target_ip $target_port" >> "$CONFIG"
+    echo "$target_ip $target_port" >> "$GENERATED_CONFIG"
     ALL_IPS[$i]="$target_ip"
     ALL_PORTS[$i]="$target_port"
     
     echo "  Node $i -> PC $PC_INDEX ($target_ip:$target_port)"
 done
 
-echo "  Saved mapping to $CONFIG!"
+echo "  Saved mapping to $GENERATED_CONFIG!"
 echo ""
 
 # --- Pre-flight: Test SSH to all UNIQUE physical slave PCs ---
@@ -189,8 +183,8 @@ for i in $(seq 1 $SLAVE_HW_COUNT); do
     # Ensure remote directory exists
     eval "$SSH_PREFIX \"$SSH_USER@$IP\" \"mkdir -p $REMOTE_WORKSPACE\" >/dev/null 2>&1"
     
-    # Notice we deploy the NEW config.remote.txt which contains the dynamic multiplex map
-    eval "$SCP_PREFIX -q \"$BINARY\" \"$CONFIG\" \"$SSH_USER@$IP:$REMOTE_WORKSPACE/config.remote.txt\" 2>/dev/null"
+    # Notice we deploy the completely new GENERATED config 
+    eval "$SCP_PREFIX -q \"$BINARY\" \"$GENERATED_CONFIG\" \"$SSH_USER@$IP:$REMOTE_WORKSPACE/\" 2>/dev/null"
     if [ $? -eq 0 ]; then
         echo "OK"
     else
