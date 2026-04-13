@@ -175,10 +175,11 @@ for i in $(seq 1 $((NODE_COUNT - 1))); do
     echo "  Spawning GUI window for Node $i on $IP:$PORT... (Check remote monitor!)"
     
     # 1. We dynamically locate the X11/Wayland Magic Cookie (Xauthority) based on standard Ubuntu paths.
-    # 2. We use `dbus-run-session` to spawn a temporary isolated D-Bus proxy, completely bypassing the "Connection refused" gnome-terminal error!
-    SSH_CMD="export DISPLAY=:0; export XAUTHORITY=\\\$(ls /run/user/\\\$(id -u)/gdm/Xauthority /run/user/\\\$(id -u)/Xauthority /home/\\\$USER/.Xauthority 2>/dev/null | head -n 1); dbus-run-session gnome-terminal --title=\"NODE $i\" -- bash -c \"~/lab04 $N $i remote $NODE_COUNT $STRATEGY; echo \\\"\\\"; read -p \\\"Press Enter to close...\\\"\""
+    # 2. We use `dbus-run-session` to spawn a temporary isolated D-Bus proxy.
+    # 3. We pipe the raw bash text straight into the remote SSH bash interpreter to completely bypass all bash-escaping syntax errors!
+    REMOTE_SCRIPT="export DISPLAY=:0; export XAUTHORITY=\$(ls /run/user/\$(id -u)/gdm/Xauthority /run/user/\$(id -u)/Xauthority \$HOME/.Xauthority 2>/dev/null | head -n 1); dbus-run-session gnome-terminal --title=\"NODE $i\" -- bash -c \"~/lab04 $N $i remote $NODE_COUNT $STRATEGY; echo; read -p 'Press Enter to close...'\""
     
-    eval "$SSH_PREFIX $SSH_USER@$IP '$SSH_CMD'" &
+    eval "echo \"\$REMOTE_SCRIPT\" | ${SSH_PREFIX} -T ${SSH_USER}@${IP} bash" &
 done
 
 echo "  Waiting for slaves to start..."
