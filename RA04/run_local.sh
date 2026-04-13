@@ -1,15 +1,15 @@
 #!/bin/bash
-# RA04 Local Mode: Each slave and master gets its own terminal window
+# RA04 Local Mode: Binomial Tree Scatter
+# Each node gets its own terminal window
 # Auto-detects OS: macOS (Terminal.app) or Linux (gnome-terminal)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# --- Detect OS and set terminal launcher ---
+# --- Terminal launcher (OS-agnostic) ---
 open_terminal() {
     local title="$1"
     local cmd="$2"
 
-    # Write command to a temp script to avoid quoting issues with paths containing spaces
     local tmp_script
     tmp_script=$(mktemp /tmp/ra04_XXXXXX)
     cat > "$tmp_script" << TMPEOF
@@ -25,13 +25,11 @@ TMPEOF
     chmod +x "$tmp_script"
 
     if [[ "$(uname)" == "Darwin" ]]; then
-        # macOS: use osascript + Terminal.app
         osascript -e "tell application \"Terminal\"
             activate
             do script \"bash '$tmp_script'\"
         end tell"
     else
-        # Linux: use gnome-terminal
         gnome-terminal --title="$title" -- bash "$tmp_script"
     fi
 }
@@ -43,30 +41,28 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-N=50       # Matrix size
-BASE=8000  # Base port from config.local.txt
-T=10       # Number of slaves
+N=1024             # Matrix size (should be divisible by TOTAL_NODES)
+TOTAL_NODES=9    # Total participating nodes (1 master + 3 slaves)
 OS_NAME=$(uname)
 
 echo "Detected OS: $OS_NAME"
+echo "Matrix: ${N}x${N} | Nodes: $TOTAL_NODES"
 echo ""
-echo "=== Launching $T slave terminals ==="
 
-# Open each slave in its own terminal window
-for i in $(seq 1 $T); do
-    PORT=$((BASE + i))
-    open_terminal "SLAVE $i (Port $PORT)" "./lab04 $N $PORT 1 local"
-    echo "  Opened terminal for Slave $i (port $PORT)"
+# Launch slave nodes first (nodes 1..TOTAL_NODES-1)
+echo "=== Launching $((TOTAL_NODES - 1)) slave nodes ==="
+for i in $(seq 1 $((TOTAL_NODES - 1))); do
+    open_terminal "NODE $i (Slave)" "./lab04 $N $i local $TOTAL_NODES"
+    echo "  Opened terminal for Node $i"
 done
 
 # Give slaves time to start listening
 sleep 2
 
+# Launch master node (node 0)
 echo ""
-echo "=== Launching Master terminal ==="
-
-# Open the master in its own terminal window
-open_terminal "MASTER (Port $BASE)" "./lab04 $N $BASE 0 local $T"
+echo "=== Launching master node ==="
+open_terminal "NODE 0 (Master)" "./lab04 $N 0 local $TOTAL_NODES"
 
 echo ""
-echo "=== All terminals launched! ==="
+echo "=== All $TOTAL_NODES terminals launched! ==="

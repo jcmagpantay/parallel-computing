@@ -6,16 +6,15 @@
 #include <sys/socket.h>
 #include <time.h>
 
-#define BUFFER_SIZE 2048
-#define MAX_SLAVES  64
+#define MAX_NODES 64
 
 // =====================================================================
-// Slave entry from config
+// Node entry from config
 // =====================================================================
 typedef struct {
     char ip[INET_ADDRSTRLEN];
     int  port;
-} SlaveEntry;
+} NodeEntry;
 
 // =====================================================================
 // Reliable send: loops until all bytes are sent
@@ -107,7 +106,6 @@ int connect_to(const char *ip, int port) {
         return -1;
     }
 
-    // Retry loop in case the target hasn't started listening yet
     int retries = 20;
     while (connect(sock_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         retries--;
@@ -116,7 +114,7 @@ int connect_to(const char *ip, int port) {
             close(sock_fd);
             return -1;
         }
-        usleep(500000); // 0.5 seconds
+        usleep(500000);
     }
 
     return sock_fd;
@@ -124,65 +122,47 @@ int connect_to(const char *ip, int port) {
 
 // =====================================================================
 // Read config for LOCAL mode
-// Format: single line "ip base_port"
-// Slave ports are auto-incremented: base_port+1, base_port+2, ...
+// Format: "ip base_port" — ports auto-increment per node_id
 // =====================================================================
-int read_config_local(const char *filename, char *master_ip, int *base_port,
-                      SlaveEntry slaves[], int t) {
+int read_config_local(const char *filename, NodeEntry nodes[], int total_nodes) {
     FILE *f = fopen(filename, "r");
-    if (!f) {
-        perror("Cannot open config.local.txt");
-        return -1;
-    }
+    if (!f) { perror("Cannot open config.local.txt"); return -1; }
 
-    if (fscanf(f, "%s %d", master_ip, base_port) != 2) {
+    char ip[INET_ADDRSTRLEN];
+    int base_port;
+    if (fscanf(f, "%s %d", ip, &base_port) != 2) {
         printf("Error: Invalid config.local.txt format. Expected: <ip> <base_port>\n");
         fclose(f);
         return -1;
     }
     fclose(f);
 
-    // Auto-generate slave entries: base_port+1, base_port+2, ..., base_port+t
-    for (int i = 0; i < t; i++) {
-        strncpy(slaves[i].ip, master_ip, INET_ADDRSTRLEN);
-        slaves[i].port = (*base_port) + (i + 1);
+    for (int i = 0; i < total_nodes; i++) {
+        strncpy(nodes[i].ip, ip, INET_ADDRSTRLEN);
+        nodes[i].port = base_port + i;
     }
-
-    return t;
+    return total_nodes;
 }
 
 // =====================================================================
 // Read config for REMOTE mode
-// Format:
-//   Line 1: master_ip
-//   Lines 2+: slave_ip port
+// Format: each line is "ip port" — line 0 = node 0 (master), etc.
 // =====================================================================
-int read_config_remote(const char *filename, char *master_ip,
-                       SlaveEntry slaves[], int max_slaves) {
+int read_config_remote(const char *filename, NodeEntry nodes[], int max_nodes) {
     FILE *f = fopen(filename, "r");
-    if (!f) {
-        perror("Cannot open config.remote.txt");
-        return -1;
-    }
-
-    if (fscanf(f, "%s", master_ip) != 1) {
-        printf("Error: Could not read master IP from config.remote.txt\n");
-        fclose(f);
-        return -1;
-    }
+    if (!f) { perror("Cannot open config.remote.txt"); return -1; }
 
     int count = 0;
-    while (count < max_slaves &&
-           fscanf(f, "%s %d", slaves[count].ip, &slaves[count].port) == 2) {
+    while (count < max_nodes &&
+           fscanf(f, "%s %d", nodes[count].ip, &nodes[count].port) == 2) {
         count++;
     }
     fclose(f);
-
     return count;
 }
 
 // =====================================================================
-// Create an n x n matrix with random positive integers (1-100)
+// Matrix utilities
 // =====================================================================
 int** create_matrix(int n) {
     int **M = (int **)malloc(n * sizeof(int *));
@@ -195,9 +175,6 @@ int** create_matrix(int n) {
     return M;
 }
 
-// =====================================================================
-// Print a matrix (or submatrix) with given rows and cols
-// =====================================================================
 void print_matrix(int **M, int rows, int cols) {
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
@@ -208,291 +185,312 @@ void print_matrix(int **M, int rows, int cols) {
     }
 }
 
-// =====================================================================
-// Free an allocated matrix
-// =====================================================================
 void free_matrix(int **M, int rows) {
-    for (int i = 0; i < rows; i++) {
-        free(M[i]);
-    }
+    if (!M) return;
+    for (int i = 0; i < rows; i++) free(M[i]);
     free(M);
 }
 
 // =====================================================================
-// MASTER LOGIC
+// Compute how many rows a subtree of nodes should own
+// Uses fair distribution: node i gets (n/total) + (i < n%total ? 1 : 0)
 // =====================================================================
-void run_master(int n, int port, const char *mode, int t) {
-    char master_ip[INET_ADDRSTRLEN];
-    int base_port = 0;
-    SlaveEntry slaves[MAX_SLAVES];
-    int num_slaves = 0;
-
-    // --- Step 1: Read config ---
-    if (strcmp(mode, "local") == 0) {
-        num_slaves = read_config_local("config.local.txt", master_ip, &base_port, slaves, t);
-    } else {
-        num_slaves = read_config_remote("config.remote.txt", master_ip, slaves, MAX_SLAVES);
+int rows_for_subtree(int start_node, int subtree_size, int n, int total_nodes) {
+    int total = 0;
+    for (int i = start_node; i < start_node + subtree_size && i < total_nodes; i++) {
+        total += (n / total_nodes) + (i < (n % total_nodes) ? 1 : 0);
     }
-
-    if (num_slaves <= 0) {
-        printf("[Master] Error: No slaves found in config.\n");
-        return;
-    }
-
-    // In local mode, t was provided; in remote mode, t = num_slaves from config
-    if (strcmp(mode, "remote") == 0) {
-        t = num_slaves;
-    }
-
-    printf("[Master] Number of slaves: %d\n", t);
-
-    // --- Step 2: Create the n x n matrix ---
-    srand((unsigned int)time(NULL));
-    int **M = create_matrix(n);
-
-    printf("[Master] Generated %d x %d matrix M:\n", n, n);
-    print_matrix(M, n, n);
-    printf("\n");
-
-    // --- Step 3: Partition the matrix into t submatrices ---
-    // Each submatrix has (n/t) rows; last slave gets the remainder
-    int base_rows = n / t;
-    int remainder  = n % t;
-
-    // --- Step 4: Record time_before ---
-    struct timespec time_before, time_after;
-    clock_gettime(CLOCK_MONOTONIC, &time_before);
-
-    // --- Step 5: Distribute submatrices to slaves ---
-    int row_offset = 0;
-    for (int i = 0; i < t; i++) {
-        int rows_for_slave = base_rows + (i < remainder ? 1 : 0);
-        int cols = n;
-
-        printf("[Master] Connecting to Slave %d at %s:%d (sending %d rows)...\n",
-               i + 1, slaves[i].ip, slaves[i].port, rows_for_slave);
-
-        // Print the submatrix being sent to this slave
-        printf("[Master] Submatrix for Slave %d (rows %d-%d):\n",
-               i + 1, row_offset, row_offset + rows_for_slave - 1);
-        print_matrix(&M[row_offset], rows_for_slave, cols);
-
-        int sock = connect_to(slaves[i].ip, slaves[i].port);
-        if (sock < 0) {
-            printf("[Master] Failed to connect to Slave %d. Aborting.\n", i + 1);
-            free_matrix(M, n);
-            return;
-        }
-
-        // Send dimensions: rows, cols (as network-byte-order uint32)
-        uint32_t net_rows = htonl((uint32_t)rows_for_slave);
-        uint32_t net_cols = htonl((uint32_t)cols);
-        send_all(sock, &net_rows, sizeof(net_rows));
-        send_all(sock, &net_cols, sizeof(net_cols));
-
-        // Send the submatrix data row by row (each row is cols * sizeof(int) bytes)
-        for (int r = 0; r < rows_for_slave; r++) {
-            // Convert each element to network byte order
-            uint32_t *row_buf = (uint32_t *)malloc(cols * sizeof(uint32_t));
-            for (int c = 0; c < cols; c++) {
-                row_buf[c] = htonl((uint32_t)M[row_offset + r][c]);
-            }
-            send_all(sock, row_buf, cols * sizeof(uint32_t));
-            free(row_buf);
-        }
-
-        // --- Step 6: Wait for acknowledgment from this slave ---
-        char ack_buf[16];
-        memset(ack_buf, 0, sizeof(ack_buf));
-        recv_all(sock, ack_buf, 3); // Receive "ack"
-
-        printf("[Master] Received acknowledgment from Slave %d: \"%s\"\n", i + 1, ack_buf);
-
-        close(sock);
-        row_offset += rows_for_slave;
-    }
-
-    // --- Step 7: Record time_after ---
-    clock_gettime(CLOCK_MONOTONIC, &time_after);
-
-    // --- Step 8: Compute and print elapsed time ---
-    double time_elapsed = (time_after.tv_sec - time_before.tv_sec) +
-                          (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
-
-    printf("\n[Master] All %d slaves acknowledged.\n", t);
-    printf("[Master] time_elapsed = %f sec\n", time_elapsed);
-
-    // Cleanup
-    free_matrix(M, n);
+    return total;
 }
 
 // =====================================================================
-// SLAVE LOGIC
+// Send a submatrix (rows [start_row, start_row+num_rows)) over a socket
+// Wire format: [uint32 rows][uint32 cols][row-major int data in network order]
 // =====================================================================
-void run_slave(int n, int port, const char *mode) {
-    char master_ip[INET_ADDRSTRLEN];
+void send_submatrix(int sock, int **data, int start_row, int num_rows, int cols) {
+    uint32_t nr = htonl((uint32_t)num_rows);
+    uint32_t nc = htonl((uint32_t)cols);
+    send_all(sock, &nr, sizeof(nr));
+    send_all(sock, &nc, sizeof(nc));
 
-    // --- Step 1: Determine master IP from config ---
-    if (strcmp(mode, "remote") == 0) {
-        SlaveEntry dummy[MAX_SLAVES];
-        read_config_remote("config.remote.txt", master_ip, dummy, MAX_SLAVES);
-        printf("[Slave] Master IP (from config): %s\n", master_ip);
-
-        // Prove this is running inside an SSH session
-        const char *ssh_conn = getenv("SSH_CONNECTION");
-        const char *ssh_client = getenv("SSH_CLIENT");
-        const char *ssh_tty = getenv("SSH_TTY");
-        if (ssh_conn) {
-            printf("[Slave] *** SSH PROOF: SSH_CONNECTION = %s\n", ssh_conn);
-            printf("[Slave] *** SSH PROOF: SSH_CLIENT     = %s\n", ssh_client ? ssh_client : "(not set)");
-            printf("[Slave] *** SSH PROOF: SSH_TTY         = %s\n", ssh_tty ? ssh_tty : "(not set)");
-        } else {
-            printf("[Slave] WARNING: Not running inside an SSH session!\n");
-        }
-    } else {
-        // In local mode, master IP is from config.local.txt (same machine)
-        int base_port;
-        SlaveEntry dummy[MAX_SLAVES];
-        read_config_local("config.local.txt", master_ip, &base_port, dummy, 0);
-        printf("[Slave] Master IP (local): %s\n", master_ip);
-    }
-
-    // --- Step 2: Listen on assigned port ---
-    int listening_socket = setup_server(port);
-    printf("[Slave] Listening on port %d, waiting for master...\n", port);
-
-    // --- Step 3: Accept connection from master ---
-    struct sockaddr_in master_addr;
-    int addrlen = sizeof(master_addr);
-    int conn = accept(listening_socket, (struct sockaddr *)&master_addr, (socklen_t *)&addrlen);
-    if (conn < 0) {
-        perror("[Slave] Accept failed");
-        close(listening_socket);
-        return;
-    }
-
-    // --- Step 4: Record time_before ---
-    struct timespec time_before, time_after;
-    clock_gettime(CLOCK_MONOTONIC, &time_before);
-
-    // --- Step 5: Receive submatrix dimensions ---
-    uint32_t net_rows, net_cols;
-    recv_all(conn, &net_rows, sizeof(net_rows));
-    recv_all(conn, &net_cols, sizeof(net_cols));
-    int rows = (int)ntohl(net_rows);
-    int cols = (int)ntohl(net_cols);
-
-    printf("[Slave] Receiving submatrix: %d rows x %d cols\n", rows, cols);
-
-    // --- Step 6: Receive submatrix data ---
-    int **submatrix = (int **)malloc(rows * sizeof(int *));
-    for (int r = 0; r < rows; r++) {
-        submatrix[r] = (int *)malloc(cols * sizeof(int));
-        uint32_t *row_buf = (uint32_t *)malloc(cols * sizeof(uint32_t));
-        recv_all(conn, row_buf, cols * sizeof(uint32_t));
+    for (int r = 0; r < num_rows; r++) {
+        uint32_t *buf = (uint32_t *)malloc(cols * sizeof(uint32_t));
         for (int c = 0; c < cols; c++) {
-            submatrix[r][c] = (int)ntohl(row_buf[c]);
+            buf[c] = htonl((uint32_t)data[start_row + r][c]);
         }
-        free(row_buf);
+        send_all(sock, buf, cols * sizeof(uint32_t));
+        free(buf);
+    }
+}
+
+// =====================================================================
+// Receive a submatrix from a socket
+// =====================================================================
+int** recv_submatrix(int sock, int *out_rows, int *out_cols) {
+    uint32_t nr, nc;
+    recv_all(sock, &nr, sizeof(nr));
+    recv_all(sock, &nc, sizeof(nc));
+    int rows = (int)ntohl(nr);
+    int cols = (int)ntohl(nc);
+
+    int **data = (int **)malloc(rows * sizeof(int *));
+    for (int r = 0; r < rows; r++) {
+        data[r] = (int *)malloc(cols * sizeof(int));
+        uint32_t *buf = (uint32_t *)malloc(cols * sizeof(uint32_t));
+        recv_all(sock, buf, cols * sizeof(uint32_t));
+        for (int c = 0; c < cols; c++) {
+            data[r][c] = (int)ntohl(buf[c]);
+        }
+        free(buf);
     }
 
-    // --- Step 7: Send acknowledgment ---
-    send_all(conn, "ack", 3);
-
-    // --- Step 8: Record time_after ---
-    clock_gettime(CLOCK_MONOTONIC, &time_after);
-
-    // --- Step 9: Print received submatrix for verification ---
-    printf("[Slave] Received submatrix:\n");
-    print_matrix(submatrix, rows, cols);
-
-    // --- Step 10: Compute and print elapsed time ---
-    double time_elapsed = (time_after.tv_sec - time_before.tv_sec) +
-                          (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
-    printf("[Slave] time_elapsed = %f sec\n", time_elapsed);
-
-    // Cleanup
-    free_matrix(submatrix, rows);
-    close(conn);
-    close(listening_socket);
+    *out_rows = rows;
+    *out_cols = cols;
+    return data;
 }
 
 // =====================================================================
 // MAIN
 // =====================================================================
 int main(int argc, char *argv[]) {
-    // Usage:
-    //   Master: ./lab04 <n> <p> 0 <mode> <t>
-    //   Slave:  ./lab04 <n> <p> 1 <mode>
-
-    // Disable stdout buffering so output is visible immediately (especially via SSH)
     setbuf(stdout, NULL);
 
+    // Usage: ./lab04 <n> <node_id> <mode> <total_nodes>
     if (argc < 5) {
-        printf("Usage:\n");
-        printf("  Master: %s <n> <p> 0 <mode> <t>\n", argv[0]);
-        printf("  Slave:  %s <n> <p> 1 <mode>\n", argv[0]);
-        printf("\n");
-        printf("  n    = size of the square matrix (n x n)\n");
-        printf("  p    = port number for this instance\n");
-        printf("  s    = status (0 = master, 1 = slave)\n");
-        printf("  mode = 'local' or 'remote'\n");
-        printf("  t    = number of slaves (master only)\n");
-        printf("\n");
-        printf("Examples:\n");
-        printf("  Master (local, 3 slaves): %s 6 8000 0 local 3\n", argv[0]);
-        printf("  Slave  (local, port 8001): %s 6 8001 1 local\n", argv[0]);
+        printf("Usage: %s <n> <node_id> <mode> <total_nodes>\n\n", argv[0]);
+        printf("  n           = size of the square matrix (n x n)\n");
+        printf("  node_id     = node identifier (0 = master, 1+ = slave)\n");
+        printf("  mode        = 'local' or 'remote'\n");
+        printf("  total_nodes = total number of participating nodes\n\n");
+        printf("Examples (4 nodes, 12x12 matrix):\n");
+        printf("  Master:  %s 12 0 local 4\n", argv[0]);
+        printf("  Slave 1: %s 12 1 local 4\n", argv[0]);
+        printf("  Slave 2: %s 12 2 local 4\n", argv[0]);
+        printf("  Slave 3: %s 12 3 local 4\n", argv[0]);
         return -1;
     }
 
-    int n    = atoi(argv[1]);  // Matrix size
-    int p    = atoi(argv[2]);  // Port number
-    int s    = atoi(argv[3]);  // Status: 0=master, 1=slave
-    char *mode = argv[4];      // "local" or "remote"
+    int n           = atoi(argv[1]);
+    int my_id       = atoi(argv[2]);
+    char *mode      = argv[3];
+    int total_nodes = atoi(argv[4]);
 
     if (n <= 0) {
         printf("Error: n must be a positive integer.\n");
         return -1;
     }
-
+    if (total_nodes <= 0 || my_id < 0 || my_id >= total_nodes) {
+        printf("Error: node_id must be in [0, total_nodes).\n");
+        return -1;
+    }
     if (strcmp(mode, "local") != 0 && strcmp(mode, "remote") != 0) {
         printf("Error: mode must be 'local' or 'remote'.\n");
         return -1;
     }
 
-    if (s == 0) {
-        // Master requires t (number of slaves)
-        if (argc < 6) {
-            printf("Error: Master requires <t> (number of slaves) as 5th argument.\n");
-            printf("Usage: %s <n> <p> 0 <mode> <t>\n", argv[0]);
-            return -1;
-        }
-        int t = atoi(argv[5]);
-        if (t <= 0) {
-            printf("Error: t (number of slaves) must be a positive integer.\n");
-            return -1;
-        }
-        if (t > n) {
-            printf("Error: t (number of slaves) cannot exceed n (matrix size).\n");
-            return -1;
-        }
-        printf("============================================\n");
-        printf("  MASTER NODE\n");
-        printf("  Matrix: %d x %d | Port: %d | Slaves: %d\n", n, n, p, t);
-        printf("  Mode: %s\n", mode);
-        printf("============================================\n\n");
-        run_master(n, p, mode, t);
-    } else if (s == 1) {
-        printf("============================================\n");
-        printf("  SLAVE NODE\n");
-        printf("  Matrix: %d x %d | Port: %d\n", n, n, p);
-        printf("  Mode: %s\n", mode);
-        printf("============================================\n\n");
-        run_slave(n, p, mode);
+    // --- Read config to learn all node addresses ---
+    NodeEntry nodes[MAX_NODES];
+    int num_nodes;
+
+    if (strcmp(mode, "local") == 0) {
+        num_nodes = read_config_local("config.local.txt", nodes, total_nodes);
     } else {
-        printf("Error: s must be 0 (master) or 1 (slave).\n");
-        return -1;
+        num_nodes = read_config_remote("config.remote.txt", nodes, MAX_NODES);
+
+        // SSH proof for slaves running in remote mode
+        if (my_id != 0) {
+            const char *ssh_conn = getenv("SSH_CONNECTION");
+            const char *ssh_client = getenv("SSH_CLIENT");
+            if (ssh_conn) {
+                printf("[Node %d] *** SSH PROOF: SSH_CONNECTION = %s\n", my_id, ssh_conn);
+                printf("[Node %d] *** SSH PROOF: SSH_CLIENT     = %s\n", my_id,
+                       ssh_client ? ssh_client : "(not set)");
+            }
+        }
     }
+
+    if (num_nodes < 0) return -1;
+
+    int my_port = nodes[my_id].port;
+
+    printf("============================================\n");
+    if (my_id == 0)
+        printf("  MASTER NODE (Node 0)\n");
+    else
+        printf("  SLAVE NODE (Node %d)\n", my_id);
+    printf("  Matrix: %d x %d | Port: %d\n", n, n, my_port);
+    printf("  Mode: %s | Total Nodes: %d\n", mode, total_nodes);
+    printf("  Strategy: Binomial Tree Scatter O(log n)\n");
+    printf("============================================\n\n");
+
+    // --- Setup listening socket ---
+    int listening_socket = setup_server(my_port);
+    printf("[Node %d] Listening on port %d\n\n", my_id, my_port);
+
+    // --- Matrix data ---
+    int **my_data = NULL;
+    int my_rows = 0;
+    int cols = n;
+    int has_data = 0;
+
+    // --- Master creates the matrix ---
+    if (my_id == 0) {
+        srand((unsigned int)time(NULL));
+        my_data = create_matrix(n);
+        my_rows = n;
+        has_data = 1;
+
+        printf("[Node 0] Generated %d x %d matrix M:\n", n, n);
+        print_matrix(my_data, my_rows, cols);
+        printf("\n");
+    }
+
+    // --- Timing ---
+    struct timespec time_before, time_after;
+    int time_started = 0;
+
+    if (my_id == 0) {
+        clock_gettime(CLOCK_MONOTONIC, &time_before);
+        time_started = 1;
+    }
+
+    // =================================================================
+    // BINOMIAL TREE SCATTER — O(log n) distribution
+    //
+    // At each stride, nodes that have data split their portion:
+    //   - Keep the top half (rows for my subtree)
+    //   - Send the bottom half to (my_id + stride)
+    //
+    // Nodes that don't have data yet check if they should receive.
+    // A node with id X receives at the stride where X % (2*stride) == stride.
+    //
+    // Example with 4 nodes, 12 rows:
+    //   stride=2: Node 0 sends rows 6-11 to Node 2. Keeps 0-5.
+    //   stride=1: Node 0 sends rows 3-5 to Node 1. Keeps 0-2.
+    //             Node 2 sends rows 9-11 to Node 3. Keeps 6-8.
+    //   Result: Node0=0-2, Node1=3-5, Node2=6-8, Node3=9-11
+    // =================================================================
+
+    int hp2 = 1;
+    while (hp2 < total_nodes) hp2 *= 2;
+
+    for (int stride = hp2 / 2; stride > 0; stride /= 2) {
+        if (has_data) {
+            int target = my_id + stride;
+            if (target < total_nodes) {
+                // Compute how many rows the target subtree needs
+                int target_subtree_size = stride;
+                if (target + stride > total_nodes)
+                    target_subtree_size = total_nodes - target;
+                int send_rows = rows_for_subtree(target, target_subtree_size, n, total_nodes);
+                int keep_rows = my_rows - send_rows;
+
+                printf("[Node %d] Stride %d: Sending %d rows to Node %d (keeping %d)\n",
+                       my_id, stride, send_rows, target, keep_rows);
+
+                // Print what we're sending
+                printf("[Node %d] Submatrix for Node %d:\n", my_id, target);
+                print_matrix(&my_data[keep_rows], send_rows, cols);
+
+                // Connect to target and send the bottom half
+                int sock = connect_to(nodes[target].ip, nodes[target].port);
+                if (sock < 0) {
+                    printf("[Node %d] ERROR: Failed to connect to Node %d!\n", my_id, target);
+                    return -1;
+                }
+                send_submatrix(sock, my_data, keep_rows, send_rows, cols);
+                close(sock);
+
+                // Free the sent rows and shrink
+                for (int r = keep_rows; r < my_rows; r++) {
+                    free(my_data[r]);
+                }
+                my_rows = keep_rows;
+                my_data = (int **)realloc(my_data, my_rows * sizeof(int *));
+
+                printf("[Node %d] Now holding %d rows\n\n", my_id, my_rows);
+            }
+        } else {
+            // Check if I should receive in this round
+            // Node X receives when X % (2*stride) == stride
+            if ((my_id % (stride * 2)) == stride) {
+                printf("[Node %d] Stride %d: Waiting to receive from parent...\n", my_id, stride);
+
+                struct sockaddr_in addr;
+                int addrlen = sizeof(addr);
+                int conn = accept(listening_socket, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
+                if (conn < 0) { perror("Accept failed"); return -1; }
+
+                // Start timing for slaves when data first arrives
+                if (!time_started) {
+                    clock_gettime(CLOCK_MONOTONIC, &time_before);
+                    time_started = 1;
+                }
+
+                my_data = recv_submatrix(conn, &my_rows, &cols);
+                close(conn);
+                has_data = 1;
+
+                printf("[Node %d] Received %d rows x %d cols\n\n", my_id, my_rows, cols);
+            }
+        }
+
+        // Brief pause between rounds for synchronization
+        usleep(200000); // 200ms
+    }
+
+    // =================================================================
+    // POST-SCATTER: Print results, acks, timing
+    // =================================================================
+
+    printf("[Node %d] === Final submatrix (%d rows x %d cols) ===\n", my_id, my_rows, cols);
+    print_matrix(my_data, my_rows, cols);
+    printf("\n");
+
+    // Slaves send "ack" to master
+    if (my_id != 0) {
+        printf("[Node %d] Sending ack to Master (Node 0) at %s:%d...\n",
+               my_id, nodes[0].ip, nodes[0].port);
+        int sock = connect_to(nodes[0].ip, nodes[0].port);
+        if (sock >= 0) {
+            send_all(sock, "ack", 3);
+            close(sock);
+            printf("[Node %d] Ack sent.\n", my_id);
+        }
+
+        // Record time_after for slave (after sending ack)
+        clock_gettime(CLOCK_MONOTONIC, &time_after);
+    }
+
+    // Master collects acks from all slaves
+    if (my_id == 0) {
+        printf("[Node 0] Waiting for acks from %d slaves...\n", total_nodes - 1);
+        for (int i = 0; i < total_nodes - 1; i++) {
+            struct sockaddr_in addr;
+            int addrlen = sizeof(addr);
+            int conn = accept(listening_socket, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
+            if (conn < 0) { perror("Accept failed"); continue; }
+
+            char ack_buf[16] = {0};
+            recv_all(conn, ack_buf, 3);
+            close(conn);
+            printf("[Node 0] Received ack %d/%d\n", i + 1, total_nodes - 1);
+        }
+
+        // Record time_after for master (after all acks)
+        clock_gettime(CLOCK_MONOTONIC, &time_after);
+        printf("[Node 0] All %d slaves acknowledged.\n\n", total_nodes - 1);
+    }
+
+    // Print elapsed time
+    double time_elapsed = (time_after.tv_sec - time_before.tv_sec) +
+                          (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
+    printf("[Node %d] time_elapsed = %f sec\n", my_id, time_elapsed);
+
+    // Cleanup
+    free_matrix(my_data, my_rows);
+    close(listening_socket);
+    printf("[Node %d] Shutting down.\n", my_id);
 
     return 0;
 }
