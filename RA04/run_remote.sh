@@ -1,5 +1,6 @@
 #!/bin/bash
 # RA04 Remote Mode: Fully dynamic — reads config.remote.txt, auto-deploys, auto-launches
+# Auto-detects OS: macOS (Terminal.app) or Linux (gnome-terminal)
 #
 # Just edit config.remote.txt with your IPs and run this script!
 # Format:
@@ -15,16 +16,49 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.remote.txt"
 BINARY="$SCRIPT_DIR/lab04"
 
+# --- Detect OS and set terminal launcher ---
+open_terminal() {
+    local title="$1"
+    local cmd="$2"
+
+    # Write command to a temp script to avoid quoting issues with paths containing spaces
+    local tmp_script
+    tmp_script=$(mktemp /tmp/ra04_XXXXXX)
+    cat > "$tmp_script" << TMPEOF
+#!/bin/bash
+echo "=== $title ==="
+$cmd
+echo ""
+echo "Press Enter to close..."
+read
+rm -f "$tmp_script"
+TMPEOF
+    chmod +x "$tmp_script"
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS: use osascript + Terminal.app
+        osascript -e "tell application \"Terminal\"
+            activate
+            do script \"bash '$tmp_script'\"
+        end tell"
+    else
+        # Linux: use gnome-terminal
+        gnome-terminal --title="$title" -- bash "$tmp_script"
+    fi
+}
+
 # --- Parse arguments ---
 N=${1:-6}
 SSH_USER=${2:-$(whoami)}
 SSH_KEY=${3:-"$HOME/.ssh/id_ed25519_local"}
+OS_NAME=$(uname)
 
 echo "============================================"
 echo "  RA04 Remote Mode (Dynamic)"
 echo "  Matrix: ${N}x${N} | User: $SSH_USER"
 echo "  Config: $CONFIG"
 echo "  SSH Key: $SSH_KEY"
+echo "  OS: $OS_NAME"
 echo "============================================"
 echo ""
 
@@ -76,7 +110,6 @@ echo "=== Step 3: Testing SSH connectivity ==="
 ALL_OK=true
 for i in $(seq 0 $((SLAVE_COUNT - 1))); do
     IP="${SLAVE_IPS[$i]}"
-    PORT="${SLAVE_PORTS[$i]}"
     printf "  Testing SSH to $IP... "
     ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 "$SSH_USER@$IP" "echo OK" 2>/dev/null
     if [ $? -ne 0 ]; then
@@ -110,7 +143,7 @@ done
 echo "Deployment complete."
 echo ""
 
-# --- Launch slaves via SSH (each in its own Terminal window) ---
+# --- Launch slaves via SSH (each in its own terminal window) ---
 echo "=== Step 5: Launching slaves ==="
 for i in $(seq 0 $((SLAVE_COUNT - 1))); do
     IP="${SLAVE_IPS[$i]}"
@@ -118,12 +151,7 @@ for i in $(seq 0 $((SLAVE_COUNT - 1))); do
     SLAVE_NUM=$((i + 1))
 
     echo "  Starting Slave $SLAVE_NUM on $IP:$PORT..."
-    osascript -e "
-        tell application \"Terminal\"
-            activate
-            do script \"echo '=== SLAVE $SLAVE_NUM ($IP:$PORT via SSH) ===' && ssh -i $SSH_KEY $SSH_USER@$IP '~/lab04 $N $PORT 1 remote'; echo ''; echo 'Press Enter to close...'; read\"
-        end tell
-    "
+    open_terminal "SLAVE $SLAVE_NUM ($IP:$PORT via SSH)" "ssh -t -i $SSH_KEY $SSH_USER@$IP '~/lab04 $N $PORT 1 remote'"
 done
 
 # Give slaves time to start listening
@@ -135,17 +163,11 @@ echo ""
 echo "=== Step 6: Launching master ==="
 MASTER_PORT=8000
 
-osascript -e "
-    tell application \"Terminal\"
-        activate
-        do script \"echo '=== MASTER ($MASTER_IP:$MASTER_PORT) ===' && cd \\\"$SCRIPT_DIR\\\" && ./lab04 $N $MASTER_PORT 0 remote $SLAVE_COUNT; echo ''; echo 'Press Enter to close...'; read\"
-    end tell
-"
+open_terminal "MASTER ($MASTER_IP:$MASTER_PORT)" "cd \"$SCRIPT_DIR\" && ./lab04 $N $MASTER_PORT 0 remote $SLAVE_COUNT"
 
 echo ""
 echo "============================================"
 echo "  All terminals launched!"
 echo "  Master: $MASTER_IP:$MASTER_PORT"
 echo "  Slaves: $SLAVE_COUNT instances"
-echo "  Check Terminal.app windows for output."
 echo "============================================"

@@ -424,6 +424,10 @@ int main(int argc, char *argv[]) {
     // Usage:
     //   Master: ./lab04 <n> <p> 0 <mode> <t>
     //   Slave:  ./lab04 <n> <p> 1 <mode>
+
+    // Disable stdout buffering so output is visible immediately (especially via SSH)
+    setbuf(stdout, NULL);
+
     if (argc < 5) {
         printf("Usage:\n");
         printf("  Master: %s <n> <p> 0 <mode> <t>\n", argv[0]);
