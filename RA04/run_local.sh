@@ -48,13 +48,14 @@ if [ $? -ne 0 ]; then
 fi
 
 N=${1:-1024}            # Matrix size
-TOTAL_NODES=${2:-9}      # Total participating nodes (1 master + N-1 slaves)
+SLAVES=${2:-8}           # Number of slave processes
+TOTAL_NODES=$((SLAVES + 1)) # Total participating nodes (1 master + slaves)
 STRATEGY=${3:-tree}      # 'linear' (O(n)) or 'tree' (O(log n))
 AFFINITY=${4:-no_affine} # 'affine' or 'no_affine'
 OS_NAME=$(uname)
 
 echo "Detected OS: $OS_NAME"
-echo "Matrix: ${N}x${N} | Nodes: $TOTAL_NODES | Strategy: $STRATEGY | Affinity: $AFFINITY"
+echo "Matrix: ${N}x${N} | Slaves: $SLAVES (Total Nodes: $TOTAL_NODES) | Strategy: $STRATEGY | Affinity: $AFFINITY"
 echo ""
 
 # Setup logs folder

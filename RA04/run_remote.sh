@@ -2,15 +2,15 @@
 # RA04 Remote Mode: Binomial Tree Scatter — Dynamic SSH deployment
 # Auto-detects OS: macOS (Terminal.app) or Linux (gnome-terminal)
 #
-# Config format (config.remote.txt):
-#   Line 0: master_ip master_port   (node 0)
-#   Line 1: slave_ip slave_port     (node 1)
-#   Line 2: slave_ip slave_port     (node 2)
-#   ...
+# Config format (config.hosts.txt):
+#   Line 0: master_ip master_base_port   (PC 0)
+#   Line 1: slave_ip slave_base_port     (PC 1)
+#   Line 2: slave_ip slave_base_port     (PC 2)
 #
-# Usage: bash run_remote.sh <n> [strategy] [ssh_user] [ssh_password]
+# Usage: bash run_remote.sh <matrix_size> <slaves> [strategy] [ssh_user] [ssh_password]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HOSTS_FILE="$SCRIPT_DIR/config.hosts.txt"
 CONFIG="$SCRIPT_DIR/config.remote.txt"
 BINARY="$SCRIPT_DIR/lab04"
 
@@ -50,10 +50,12 @@ TMPEOF
 }
 
 # --- Parse arguments ---
-N=${1:-12}
-STRATEGY=${2:-tree}     # 'linear' or 'tree'
-SSH_USER=${3:-$(whoami)}
-SSH_PASS=${4:-"useruser"} # Defaults to lab password
+N=${1:-1024}
+SLAVES=${2:-12}
+TOTAL_NODES=$((SLAVES + 1))
+STRATEGY=${3:-tree}     # 'linear' or 'tree'
+SSH_USER=${4:-$(whoami)}
+SSH_PASS=${5:-"useruser"} # Defaults to lab password
 OS_NAME=$(uname)
 
 REMOTE_WORKSPACE="~/Documents/jcmagpantay-remote"
@@ -72,11 +74,10 @@ else
 fi
 
 echo "============================================"
-echo "  RA04 Remote Mode"
-echo "  Matrix: ${N}x${N} | User: $SSH_USER"
-echo "  Strategy: $STRATEGY"
-echo "  Config: $CONFIG"
-echo "  OS: $OS_NAME"
+echo "  RA04 Remote Multiplexing Mode"
+echo "  Matrix: ${N}x${N} | Slaves: $SLAVES (Total Nodes: $TOTAL_NODES)"
+echo "  User: $SSH_USER | Strategy: $STRATEGY"
+echo "  Workspace: $REMOTE_WORKSPACE"
 echo "============================================"
 echo ""
 
@@ -90,44 +91,76 @@ fi
 echo "Compiled successfully."
 echo ""
 
-# --- Read config.remote.txt ---
-echo "=== Step 2: Reading config.remote.txt ==="
+# --- Read Hardware config ---
+echo "=== Step 2: Preparing Hardware Topology ==="
 
-if [ ! -f "$CONFIG" ]; then
-    echo "ERROR: $CONFIG not found!"
-    exit 1
+# Auto-migrate config.remote.txt to config.hosts.txt to preserve physical IPs
+if [ ! -f "$HOSTS_FILE" ]; then
+    if [ -f "$CONFIG" ]; then
+        echo "  Migrating config.remote.txt -> config.hosts.txt (Base HW IPs)"
+        mv "$CONFIG" "$HOSTS_FILE"
+    else
+        echo "ERROR: $HOSTS_FILE not found!"
+        exit 1
+    fi
 fi
 
-ALL_IPS=()
-ALL_PORTS=()
-NODE_COUNT=0
+HW_IPS=()
+HW_PORTS=()
+HW_COUNT=0
 
 while IFS=' ' read -r ip port || [ -n "$ip" ]; do
     [ -z "$ip" ] && continue
-    ALL_IPS+=("$ip")
-    ALL_PORTS+=("$port")
-    echo "  Node $NODE_COUNT: $ip:$port"
-    NODE_COUNT=$((NODE_COUNT + 1))
-done < "$CONFIG"
+    HW_IPS+=("$ip")
+    HW_PORTS+=("$port")
+    HW_COUNT=$((HW_COUNT + 1))
+done < "$HOSTS_FILE"
 
-if [ "$NODE_COUNT" -lt 2 ]; then
-    echo "ERROR: Need at least 2 nodes (1 master + 1 slave) in config!"
+if [ "$HW_COUNT" -lt 2 ]; then
+    echo "ERROR: Need at least 2 physical PCs (1 master + 1 slave) in $HOSTS_FILE!"
     exit 1
 fi
 
-MASTER_IP="${ALL_IPS[0]}"
-MASTER_PORT="${ALL_PORTS[0]}"
-SLAVE_COUNT=$((NODE_COUNT - 1))
-
-echo "  Master: $MASTER_IP:$MASTER_PORT"
-echo "  Total nodes: $NODE_COUNT ($SLAVE_COUNT slaves)"
+SLAVE_HW_COUNT=$((HW_COUNT - 1))
+echo "  Detected $HW_COUNT Physical Hardware PCs ($SLAVE_HW_COUNT available for slaves)"
 echo ""
 
-# --- Pre-flight: Test SSH to all slaves ---
-echo "=== Step 3: Testing SSH connectivity ==="
+# --- Generate logical mapping config.remote.txt ---
+echo "=== Step 3: Multiplexing Nodes onto Hardware ==="
+rm -f "$CONFIG"
+ALL_IPS=()
+ALL_PORTS=()
+
+# Route Node 0 to PC 0 (Master)
+echo "${HW_IPS[0]} ${HW_PORTS[0]}" >> "$CONFIG"
+ALL_IPS[0]="${HW_IPS[0]}"
+ALL_PORTS[0]="${HW_PORTS[0]}"
+echo "  Node 0 -> HW Master (${HW_IPS[0]}:${HW_PORTS[0]})"
+
+# Route Nodes 1 to SLAVES dynamically across Slave PCs
+for i in $(seq 1 $SLAVES); do
+    # Distribute sequentially using modulo (1-indexed offset)
+    PC_INDEX=$(( ((i - 1) % SLAVE_HW_COUNT) + 1 ))
+    target_ip="${HW_IPS[$PC_INDEX]}"
+    
+    # Increment port to avoid binding conflicts when many nodes run on 1 physical PC
+    target_port=$((HW_PORTS[$PC_INDEX] + i))
+    
+    echo "$target_ip $target_port" >> "$CONFIG"
+    ALL_IPS[$i]="$target_ip"
+    ALL_PORTS[$i]="$target_port"
+    
+    echo "  Node $i -> PC $PC_INDEX ($target_ip:$target_port)"
+done
+
+echo "  Saved mapping to $CONFIG!"
+echo ""
+
+# --- Pre-flight: Test SSH to all UNIQUE physical slave PCs ---
+echo "=== Step 4: Testing physical SSH connectivity ==="
 ALL_OK=true
-for i in $(seq 1 $((NODE_COUNT - 1))); do
-    IP="${ALL_IPS[$i]}"
+for i in $(seq 1 $SLAVE_HW_COUNT); do
+    IP="${HW_IPS[$i]}"
     printf "  Testing SSH to $IP (Node $i)... "
     # We remove BatchMode because we're using passwords now
     eval "$SSH_PREFIX -o ConnectTimeout=5 \"$SSH_USER@$IP\" \"echo OK\" >/dev/null 2>&1"
@@ -147,16 +180,17 @@ fi
 echo "All SSH connections OK!"
 echo ""
 
-# --- Deploy binary + config to all slaves ---
-echo "=== Step 4: Deploying to slaves ==="
-for i in $(seq 1 $((NODE_COUNT - 1))); do
-    IP="${ALL_IPS[$i]}"
-    printf "  Copying to $SSH_USER@$IP:$REMOTE_WORKSPACE/ (Node $i)... "
+# --- Deploy binary + generated config to hardware ---
+echo "=== Step 5: Deploying to physical slave machines ==="
+for i in $(seq 1 $SLAVE_HW_COUNT); do
+    IP="${HW_IPS[$i]}"
+    printf "  Deploying to Hardware PC $i ($SSH_USER@$IP:$REMOTE_WORKSPACE/)... "
     
     # Ensure remote directory exists
     eval "$SSH_PREFIX \"$SSH_USER@$IP\" \"mkdir -p $REMOTE_WORKSPACE\" >/dev/null 2>&1"
     
-    eval "$SCP_PREFIX -q \"$BINARY\" \"$CONFIG\" \"$SSH_USER@$IP:$REMOTE_WORKSPACE/\" 2>/dev/null"
+    # Notice we deploy the NEW config.remote.txt which contains the dynamic multiplex map
+    eval "$SCP_PREFIX -q \"$BINARY\" \"$CONFIG\" \"$SSH_USER@$IP:$REMOTE_WORKSPACE/config.remote.txt\" 2>/dev/null"
     if [ $? -eq 0 ]; then
         echo "OK"
     else
@@ -171,33 +205,35 @@ echo ""
 rm -rf "$SCRIPT_DIR/logs"
 mkdir -p "$SCRIPT_DIR/logs"
 
-# --- Launch slave nodes via SSH ---
-echo "=== Step 5: Launching slaves ==="
-for i in $(seq 1 $((NODE_COUNT - 1))); do
+# --- Launch slave processes via SSH ---
+echo "=== Step 6: Launching $SLAVES slaves across $SLAVE_HW_COUNT machines ==="
+for i in $(seq 1 $SLAVES); do
     IP="${ALL_IPS[$i]}"
     PORT="${ALL_PORTS[$i]}"
     LOG_FILE="Node_${i}_Slave_${IP}_${PORT}.log"
 
-    echo "  Starting Node $i on $IP:$PORT... (Logging to $LOG_FILE)"
+    echo "  Starting Node $i on $IP:$PORT... (Logging remotely to $LOG_FILE)"
     
     # Payload tells the remote PC to create its own logs folder, run lab04, and duplicate the stdout to a remote log file.
-    REMOTE_CMD="mkdir -p $REMOTE_WORKSPACE/logs && cd $REMOTE_WORKSPACE && ./lab04 $N $i remote $NODE_COUNT $STRATEGY | tee $REMOTE_WORKSPACE/logs/$LOG_FILE"
+    REMOTE_CMD="mkdir -p $REMOTE_WORKSPACE/logs && cd $REMOTE_WORKSPACE && ./lab04 $N $i remote $TOTAL_NODES $STRATEGY | tee $REMOTE_WORKSPACE/logs/$LOG_FILE"
     open_terminal "NODE $i ($IP:$PORT via SSH)" "eval \"$SSH_PREFIX -t $SSH_USER@$IP '$REMOTE_CMD'\"" "$LOG_FILE"
 done
 
-echo "  Waiting for slaves to start..."
+echo "  Waiting for slaves to sync..."
 sleep 3
 echo ""
 
 # --- Launch master locally ---
-echo "=== Step 6: Launching master ==="
+echo "=== Step 7: Launching master === "
+MASTER_IP="${ALL_IPS[0]}"
+MASTER_PORT="${ALL_PORTS[0]}"
 LOG_FILE="Node_0_Master_${MASTER_IP}_${MASTER_PORT}.log"
-open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab04 $N 0 remote $NODE_COUNT $STRATEGY" "$LOG_FILE"
+open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab04 $N 0 remote $TOTAL_NODES $STRATEGY" "$LOG_FILE"
 
 echo ""
 echo "============================================"
-echo "  All $NODE_COUNT terminals launched!"
+echo "  All $TOTAL_NODES process terminals launched!"
 echo "  Strategy: $STRATEGY"
 echo "  Master: $MASTER_IP:$MASTER_PORT"
-echo "  Slaves: $SLAVE_COUNT instances"
+echo "  Slaves: $SLAVES processes routed across $SLAVE_HW_COUNT hardware PCs"
 echo "============================================"

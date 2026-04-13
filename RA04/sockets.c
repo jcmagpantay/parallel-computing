@@ -12,7 +12,7 @@
 #include <sys/socket.h>
 #include <time.h>
 
-#define MAX_NODES 64
+#define MAX_NODES 256
 
 // =====================================================================
 // Node entry from config
