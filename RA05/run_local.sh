@@ -60,6 +60,7 @@ SLAVES=${2:-8}           # Number of slave processes
 TOTAL_NODES=$((SLAVES + 1)) # Total participating nodes (1 master + slaves)
 STRATEGY=${3:-tree}      # 'linear' (O(n)) or 'tree' (O(log n))
 AFFINITY=${4:-no_affine} # 'affine' or 'no_affine'
+TEST_FLAG=${5:-}         # 'test' to use known 5x5 matrix
 OS_NAME=$(uname)
 
 echo "Detected OS: $OS_NAME"
@@ -76,7 +77,7 @@ echo "=== Launching $((TOTAL_NODES - 1)) slave nodes ==="
 for i in $(seq 1 $((TOTAL_NODES - 1))); do
     PORT=$((BASE_PORT + i))
     LOG_FILE="Node_${i}_Slave_${PORT}.log"
-    open_terminal "NODE $i (Slave)" "./lab05 $N $i local $TOTAL_NODES $STRATEGY $AFFINITY" "$LOG_FILE"
+    open_terminal "NODE $i (Slave)" "./lab05 $N $i local $TOTAL_NODES $STRATEGY $AFFINITY $TEST_FLAG" "$LOG_FILE"
     echo "  Opened terminal for Node $i (Logging to $LOG_FILE)"
 done
 
@@ -87,7 +88,7 @@ sleep 2
 echo ""
 echo "=== Launching master node ==="
 LOG_FILE="Node_0_Master_${BASE_PORT}.log"
-open_terminal "NODE 0 (Master)" "./lab05 $N 0 local $TOTAL_NODES $STRATEGY $AFFINITY" "$LOG_FILE"
+open_terminal "NODE 0 (Master)" "./lab05 $N 0 local $TOTAL_NODES $STRATEGY $AFFINITY $TEST_FLAG" "$LOG_FILE"
 
 echo ""
 echo "=== All $TOTAL_NODES terminals launched! ==="

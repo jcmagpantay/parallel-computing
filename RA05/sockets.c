@@ -217,33 +217,41 @@ int compute_q(int n) {
     return (int)fmin;
 }
 
-// Moving average from RA01: average of x[i-q..i-1][j] (1-indexed logic)
-float moving_ave(int **x, int i, int j, int q) {
-    float sum = 0;
-    for (int k = i - q; k <= i - 1; k++) {
-        sum += x[k-1][j-1];
+// Transpose an n×n matrix: X^T[j][i] = X[i][j]
+// After transpose, each row of X^T contains all data for one column of X.
+int** transpose_matrix(int **M, int n) {
+    int **T = (int **)malloc(n * sizeof(int *));
+    for (int j = 0; j < n; j++) {
+        T[j] = (int *)malloc(n * sizeof(int));
+        for (int i = 0; i < n; i++) {
+            T[j][i] = M[i][j];
+        }
     }
-    return sum / q;
+    return T;
 }
 
-// Compute Order Q MA MSE for a local submatrix (rows x cols)
-// Returns a float vector of length cols
-float* compute_ma(int **submatrix, int rows, int cols, int q) {
-    float *p = (float *)calloc(cols, sizeof(float));
-    // Clamp q to what we can actually compute with our local rows
-    if (q >= rows) q = rows - 1;
-    if (q <= 0) {
-        // Can't compute MA with 0 or negative q
-        return p;
-    }
-    for (int j = 1; j <= cols; j++) {
-        float sum = 0;
-        for (int i = q + 1; i <= rows; i++) {
-            float ma = moving_ave(submatrix, i, j, q);
-            float diff = submatrix[i-1][j-1] - ma;
-            sum += diff * diff;
+// Compute Order Q MA MSE on transposed submatrix.
+// Each row of the submatrix is a FULL original column (length = col_len).
+// Returns a float vector of length `local_rows` (one p[j] per assigned column).
+float* compute_ma(int **submatrix, int local_rows, int col_len, int q) {
+    float *p = (float *)calloc(local_rows, sizeof(float));
+    if (q >= col_len) q = col_len - 1;
+    if (q <= 0) return p;
+
+    for (int r = 0; r < local_rows; r++) {
+        // submatrix[r] contains all m values of original column j
+        float sum_sq = 0;
+        for (int i = q; i < col_len; i++) {
+            // moving average of submatrix[r][i-q..i-1]
+            float ma = 0;
+            for (int k = i - q; k < i; k++) {
+                ma += submatrix[r][k];
+            }
+            ma /= q;
+            float diff = submatrix[r][i] - ma;
+            sum_sq += diff * diff;
         }
-        p[j-1] = sqrtf(sum) / (rows - q);
+        p[r] = sqrtf(sum_sq) / (col_len - q);
     }
     return p;
 }
@@ -685,7 +693,14 @@ int run_test() {
     print_matrix(M, n, n);
     printf("\n");
 
-    float *p = compute_ma(M, n, n, q);
+    // Transpose: each row of T is a full column of X
+    int **T = transpose_matrix(M, n);
+    printf("Transposed X^T:\n");
+    print_matrix(T, n, n);
+    printf("\n");
+
+    // compute_ma on transposed: local_rows=n (all columns), col_len=n (all original rows)
+    float *p = compute_ma(T, n, n, q);
 
     float expected[] = {1.414214f, 2.828427f, 4.242641f, 5.656854f, 7.071068f};
 
@@ -713,6 +728,7 @@ int run_test() {
     }
 
     free(p);
+    free_matrix(T, n);
     free_matrix(M, n);
     return pass ? 0 : 1;
 }
@@ -768,7 +784,17 @@ int main(int argc, char *argv[]) {
     }
 
     int use_tree = (strcmp(strategy, "tree") == 0);
-    int use_affine = (argc >= 7 && strcmp(argv[6], "affine") == 0);
+    int use_affine = 0;
+    int test_mode = 0;
+
+    // Check remaining args for 'affine' and 'test' flags
+    for (int a = 6; a < argc; a++) {
+        if (strcmp(argv[a], "affine") == 0) use_affine = 1;
+        if (strcmp(argv[a], "test") == 0)   test_mode = 1;
+    }
+
+    // test mode forces n=5
+    if (test_mode) n = 5;
 
     // apply the core affine code.
     if (use_affine && strcmp(mode, "local") == 0) {
@@ -821,14 +847,35 @@ int main(int argc, char *argv[]) {
     int listening_socket = setup_server(my_port);
     printf("[Node %d] Listening on port %d\n\n", my_id, my_port);
 
-    // Master creates the full matrix
+    // Master creates the full matrix, then transposes for column-based distribution
     int **full_matrix = NULL;
 
     if (my_id == 0) {
-        srand((unsigned int)time(NULL));
-        full_matrix = create_matrix(n);
+        int **original;
+        if (test_mode) {
+            // Known test matrix: X[i][j] = (i+1)*(j+1), n=5, expected q=3
+            printf("[Node 0] TEST MODE — using known 5x5 matrix\n\n");
+            original = (int **)malloc(n * sizeof(int *));
+            for (int i = 0; i < n; i++) {
+                original[i] = (int *)malloc(n * sizeof(int));
+                for (int j = 0; j < n; j++)
+                    original[i][j] = (i + 1) * (j + 1);
+            }
+        } else {
+            srand((unsigned int)time(NULL));
+            original = create_matrix(n);
+        }
 
-        printf("[Node 0] Generated %d x %d matrix M:\n", n, n);
+        printf("[Node 0] Generated %d x %d matrix X:\n", n, n);
+        print_matrix(original, n, n);
+        printf("\n");
+
+        // Transpose: each row of X^T = one full column of X
+        // This way, distributing ROWS of X^T gives each slave complete columns
+        full_matrix = transpose_matrix(original, n);
+        free_matrix(original, n);
+
+        printf("[Node 0] Transposed to %d x %d matrix X^T (rows = columns of X):\n", n, n);
         print_matrix(full_matrix, n, n);
         printf("\n");
     }
@@ -875,19 +922,21 @@ int main(int argc, char *argv[]) {
     // so its vector is (my_cols + 2) elements. M1PR concatenates
     // everything; master strips metadata after gather.
     // ============================================================
-    int q = compute_q(n);
+    int q = test_mode ? 3 : compute_q(n);
     float *my_p = NULL;
     int my_p_len = 0;
 
     if (my_id != 0) {
-        // SLAVE: compute MA and time it
-        printf("[Node %d] Computing Order Q=%d Moving Averages on %d rows x %d cols...\n",
+        // SLAVE: compute MA on transposed submatrix
+        // my_rows = number of original columns assigned to this slave
+        // my_cols = n = length of each original column (full sequence for MA)
+        printf("[Node %d] Computing Order Q=%d Moving Averages on %d columns (each len %d)...\n",
                my_id, q, my_rows, my_cols);
 
         struct timespec slave_tb, slave_ta;
         clock_gettime(CLOCK_MONOTONIC, &slave_tb);
         my_p = compute_ma(my_data, my_rows, my_cols, q);
-        my_p_len = my_cols;
+        my_p_len = my_rows;  // one p[j] per assigned column
         clock_gettime(CLOCK_MONOTONIC, &slave_ta);
 
         double slave_elapsed = (slave_ta.tv_sec - slave_tb.tv_sec) +
@@ -921,24 +970,22 @@ int main(int argc, char *argv[]) {
         double total_elapsed = (time_after.tv_sec - time_before.tv_sec) +
                                (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
 
-        // Parse rebuilt vector: each slave contributed (my_cols + 2) elements
-        // Layout: [p0...p_{cols-1}, node_id, elapsed] repeated per slave
-        int num_slaves = total_nodes - 1;
-        int block_size = n + 2;  // n cols + 2 metadata
+        // Parse rebuilt vector: each slave contributed (rows_for_node + 2) elements
+        // Layout: [p0...p_{k-1}, node_id, elapsed] per slave, variable k
         double slave_times[MAX_NODES] = {0};
-        float *clean_p = (float *)malloc(num_slaves * n * sizeof(float));
+        float *clean_p = (float *)malloc(n * sizeof(float));
         int clean_len = 0;
 
-        for (int s = 0; s < num_slaves; s++) {
-            int offset = s * block_size;
-            if (offset + block_size <= my_p_len) {
-                // Copy the actual p values
-                memcpy(&clean_p[clean_len], &my_p[offset], n * sizeof(float));
-                clean_len += n;
-                // Extract metadata
-                int sid = (int)my_p[offset + n];
-                double t = (double)my_p[offset + n + 1];
+        int offset = 0;
+        for (int s = 1; s < total_nodes; s++) {
+            int slave_cols = rows_for_node(s, n, total_nodes);
+            if (offset + slave_cols + 2 <= my_p_len) {
+                memcpy(&clean_p[clean_len], &my_p[offset], slave_cols * sizeof(float));
+                clean_len += slave_cols;
+                int sid = (int)my_p[offset + slave_cols];
+                double t = (double)my_p[offset + slave_cols + 1];
                 slave_times[sid] = t;
+                offset += slave_cols + 2;
             }
         }
 
@@ -972,6 +1019,30 @@ int main(int argc, char *argv[]) {
         printf("║    %.6f sec                                          ║\n", total_elapsed);
         printf("║    (1MPB scatter + slave MA + M1PR gather)              ║\n");
         printf("╚══════════════════════════════════════════════════════════╝\n");
+
+        // Verify results in test mode
+        if (test_mode && clean_len == 5) {
+            float expected[] = {1.414214f, 2.828427f, 4.242641f, 5.656854f, 7.071068f};
+            int pass = 1;
+            printf("\n╔════════════════════════════════════════════╗\n");
+            printf("║  TEST VERIFICATION                         ║\n");
+            printf("╠════════════════════════════════════════════╣\n");
+            printf("║  Computed: ");
+            for (int i = 0; i < 5; i++) printf("%.4f ", clean_p[i]);
+            printf("║\n");
+            printf("║  Expected: ");
+            for (int i = 0; i < 5; i++) printf("%.4f ", expected[i]);
+            printf("║\n");
+            for (int i = 0; i < 5; i++) {
+                if (fabsf(clean_p[i] - expected[i]) > 0.001f) {
+                    printf("║  ✗ p[%d] mismatch!                         ║\n", i);
+                    pass = 0;
+                }
+            }
+            printf("║  %s                              ║\n",
+                   pass ? "✓ ALL TESTS PASSED" : "✗ TESTS FAILED    ");
+            printf("╚════════════════════════════════════════════╝\n");
+        }
 
         free(clean_p);
     } else {
