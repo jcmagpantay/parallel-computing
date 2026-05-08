@@ -90,6 +90,13 @@ fi
 echo "Compiled successfully."
 echo ""
 
+# Quick test mode: bash run_remote.sh test
+if [ "${1}" = "test" ]; then
+    echo "=== Running standalone MA test ==="
+    "$BINARY" test
+    exit $?
+fi
+
 # --- Read Hardware config ---
 echo "=== Step 2: Preparing Hardware Topology ==="
 

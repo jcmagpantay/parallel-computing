@@ -278,21 +278,24 @@ void print_vector(float *vec, int len) {
     }
     printf("\n");
 }
+
+// Master (node 0) gets 0 rows — only slaves compute.
+// Rows are distributed evenly among slaves (nodes 1..total_nodes-1).
+int rows_for_node(int node_id, int n, int total_nodes) {
+    if (node_id == 0) return 0;
+    int num_slaves = total_nodes - 1;
+    int slave_idx = node_id - 1;
+    return (n / num_slaves) + (slave_idx < (n % num_slaves) ? 1 : 0);
+}
+
 int rows_for_subtree(int start_node, int subtree_size, int n, int total_nodes) {
     int total = 0;
     for (int i = start_node; i < start_node + subtree_size && i < total_nodes; i++) {
-        // Distributes row while accounting for the leftovers
-        total += (n / total_nodes) + (i < (n % total_nodes) ? 1 : 0);
+        total += rows_for_node(i, n, total_nodes);
     }
     return total;
 }
 
-// this is no longer relevant for the current code: this was for O(n) linear broadcast
-int rows_for_node(int node_id, int n, int total_nodes) {
-    return (n / total_nodes) + (node_id < (n % total_nodes) ? 1 : 0);
-}
-
-// this is also no longer relevant: this was for O(n) linear 
 int start_row_for_node(int node_id, int n, int total_nodes) {
     int start = 0;
     for (int i = 0; i < node_id; i++) {
@@ -496,7 +499,12 @@ void scatter_tree(int my_id, int total_nodes, int n,
                     free(my_data[r]);
                 }
                 my_rows = keep_rows;
-                my_data = (int **)realloc(my_data, my_rows * sizeof(int *));
+                if (my_rows > 0) {
+                    my_data = (int **)realloc(my_data, my_rows * sizeof(int *));
+                } else {
+                    free(my_data);
+                    my_data = NULL;
+                }
 
                 printf("\n  ✓ Sent! Now holding %d rows\n\n", my_rows);
             }
@@ -536,14 +544,17 @@ void scatter_tree(int my_id, int total_nodes, int n,
 
     // THis portion of code is to avoid double free-ing the matrices
     if (my_id == 0) {
-        // copy the full matrix so that master has a valid matrix to free
-        int **copy = (int **)malloc(my_rows * sizeof(int *));
-        for (int r = 0; r < my_rows; r++) {
-            copy[r] = (int *)malloc(cols * sizeof(int));
-            memcpy(copy[r], my_data[r], cols * sizeof(int));
+        // Master ends with 0 rows (all distributed to slaves)
+        if (my_rows > 0) {
+            int **copy = (int **)malloc(my_rows * sizeof(int *));
+            for (int r = 0; r < my_rows; r++) {
+                copy[r] = (int *)malloc(cols * sizeof(int));
+                memcpy(copy[r], my_data[r], cols * sizeof(int));
+            }
+            *out_data = copy;
+        } else {
+            *out_data = NULL;
         }
-
-        *out_data = copy;
     } else {
         *out_data = my_data;
     }
@@ -595,10 +606,16 @@ void gather_tree(int my_id, int total_nodes,
 
             // Concatenate: my_p = [my_p | child_p]
             int new_len = *my_p_len + child_len;
-            *my_p = (float *)realloc(*my_p, new_len * sizeof(float));
-            memcpy((*my_p) + *my_p_len, child_p, child_len * sizeof(float));
+            if (*my_p == NULL) {
+                // First receive — just take child's data
+                *my_p = child_p;
+                child_p = NULL;  // prevent free below
+            } else {
+                *my_p = (float *)realloc(*my_p, new_len * sizeof(float));
+                memcpy((*my_p) + *my_p_len, child_p, child_len * sizeof(float));
+            }
             *my_p_len = new_len;
-            free(child_p);
+            if (child_p) free(child_p);
 
             printf("  ✓ Received %d elements from Node %d, now holding %d elements\n\n",
                    child_len, child, new_len);
@@ -642,11 +659,74 @@ void pin_to_core(int core_id) {
 #endif
 }
 
+// ============================================================
+// STANDALONE TEST: ./lab05 test
+// Known 5x5 matrix X[i][j] = i*j (1-indexed), q=3
+// Expected p: [1.414214, 2.828427, 4.242641, 5.656854, 7.071068]
+// ============================================================
+int run_test() {
+    printf("╔════════════════════════════════════════════╗\n");
+    printf("║  STANDALONE MA TEST (no networking)        ║\n");
+    printf("╠════════════════════════════════════════════╣\n");
+    printf("║  Matrix: 5x5  X[i][j] = i*j  (1-indexed)  ║\n");
+    printf("║  Q = 3                                     ║\n");
+    printf("╚════════════════════════════════════════════╝\n\n");
+
+    int n = 5, q = 3;
+    int **M = (int **)malloc(n * sizeof(int *));
+    for (int i = 0; i < n; i++) {
+        M[i] = (int *)malloc(n * sizeof(int));
+        for (int j = 0; j < n; j++) {
+            M[i][j] = (i + 1) * (j + 1);  // 1-indexed: X[i][j] = i*j
+        }
+    }
+
+    printf("Matrix X:\n");
+    print_matrix(M, n, n);
+    printf("\n");
+
+    float *p = compute_ma(M, n, n, q);
+
+    float expected[] = {1.414214f, 2.828427f, 4.242641f, 5.656854f, 7.071068f};
+
+    printf("Computed p:  ");
+    for (int i = 0; i < n; i++) printf("%.6f  ", p[i]);
+    printf("\n");
+
+    printf("Expected p:  ");
+    for (int i = 0; i < n; i++) printf("%.6f  ", expected[i]);
+    printf("\n\n");
+
+    int pass = 1;
+    for (int i = 0; i < n; i++) {
+        float diff = fabsf(p[i] - expected[i]);
+        if (diff > 0.001f) {
+            printf("  ✗ p[%d]: got %.6f, expected %.6f (diff=%.6f)\n", i, p[i], expected[i], diff);
+            pass = 0;
+        }
+    }
+
+    if (pass) {
+        printf("  ✓ ALL TESTS PASSED\n\n");
+    } else {
+        printf("\n  ✗ SOME TESTS FAILED\n\n");
+    }
+
+    free(p);
+    free_matrix(M, n);
+    return pass ? 0 : 1;
+}
+
 // MAIN
 int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
 
-    // Usage: ./lab04 <n> <node_id> <mode> <total_nodes> <strategy> [affine]
+    // Quick test mode: ./lab05 test
+    if (argc >= 2 && strcmp(argv[1], "test") == 0) {
+        return run_test();
+    }
+
+    // Usage: ./lab05 <n> <node_id> <mode> <total_nodes> <strategy> [affine]
     if (argc < 6) {
         printf("Usage: %s <n> <node_id> <mode> <total_nodes> <strategy> [affine]\n\n", argv[0]);
         printf("  n           = size of the square matrix (n x n)\n");
@@ -778,101 +858,132 @@ int main(int argc, char *argv[]) {
     }
 
     // After scatter, print final submatrix
-    printf("╔════════════════════════════════════════════╗\n");
-    printf("║  Node %-2d — Final Submatrix                 ║\n", my_id);
-    printf("║  %d rows x %d cols                           \n", my_rows, my_cols);
-    printf("╚════════════════════════════════════════════╝\n");
-    print_matrix(my_data, my_rows, my_cols);
-    printf("\n");
+    if (my_rows > 0) {
+        printf("╔════════════════════════════════════════════╗\n");
+        printf("║  Node %-2d — Final Submatrix                 ║\n", my_id);
+        printf("║  %d rows x %d cols                           \n", my_rows, my_cols);
+        printf("╚════════════════════════════════════════════╝\n");
+        print_matrix(my_data, my_rows, my_cols);
+        printf("\n");
+    } else {
+        printf("[Node %d] Master holds 0 rows (all distributed to slaves)\n\n", my_id);
+    }
 
     // ============================================================
-    // PHASE 2: Compute Order Q Moving Averages on local submatrix
+    // PHASE 2: Compute Order Q Moving Averages (SLAVES ONLY)
+    // Each slave appends 2 metadata floats: [node_id, elapsed_time]
+    // so its vector is (my_cols + 2) elements. M1PR concatenates
+    // everything; master strips metadata after gather.
     // ============================================================
     int q = compute_q(n);
-    printf("[Node %d] Computing Order Q=%d Moving Averages on %d rows x %d cols...\n",
-           my_id, q, my_rows, my_cols);
+    float *my_p = NULL;
+    int my_p_len = 0;
 
-    // Slave timing: start ONLY around MA computation
-    struct timespec slave_tb, slave_ta;
     if (my_id != 0) {
+        // SLAVE: compute MA and time it
+        printf("[Node %d] Computing Order Q=%d Moving Averages on %d rows x %d cols...\n",
+               my_id, q, my_rows, my_cols);
+
+        struct timespec slave_tb, slave_ta;
         clock_gettime(CLOCK_MONOTONIC, &slave_tb);
-    }
-
-    float *my_p = compute_ma(my_data, my_rows, my_cols, q);
-    int my_p_len = my_cols;
-
-    if (my_id != 0) {
+        my_p = compute_ma(my_data, my_rows, my_cols, q);
+        my_p_len = my_cols;
         clock_gettime(CLOCK_MONOTONIC, &slave_ta);
-    }
 
-    printf("[Node %d] Partial vector p (%d elements):\n", my_id, my_p_len);
-    print_vector(my_p, my_p_len);
-    printf("\n");
-
-    // ============================================================
-    // PHASE 3: M1PR — Many-to-One Personalized Reduction
-    // Reverse binomial tree to send partial p vectors back to master
-    // ============================================================
-    gather_tree(my_id, total_nodes, &my_p, &my_p_len, listening_socket, nodes);
-
-    // Master stops its timer after full vector p is rebuilt
-    struct timespec time_after;
-    if (my_id == 0) {
-        clock_gettime(CLOCK_MONOTONIC, &time_after);
-    }
-
-    // Master prints the rebuilt full vector p
-    if (my_id == 0) {
-        printf("╔════════════════════════════════════════════╗\n");
-        printf("║  MASTER — Rebuilt Full Vector p             ║\n");
-        printf("║  %d elements                                \n", my_p_len);
-        printf("╚════════════════════════════════════════════╝\n");
-        print_vector(my_p, my_p_len);
-        printf("\n");
-    }
-
-    // Time results
-    if (my_id == 0) {
-        // Master: time from before scatter to after full p is rebuilt
-        double time_elapsed = (time_after.tv_sec - time_before.tv_sec) +
-                              (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
-
-        printf("╔════════════════════════════════════════════╗\n");
-        printf("║  Node 0  — MASTER RESULTS                  ║\n");
-        printf("╠════════════════════════════════════════════╣\n");
-        printf("║  Strategy:     %-8s %s    ║\n",
-               use_tree ? "TREE" : "LINEAR",
-               use_tree ? "O(log n)" : "O(n)    ");
-        printf("║  Q (MA order): %-5d                       ║\n", q);
-        printf("║  time_elapsed: %.6f sec              ║\n", time_elapsed);
-        printf("║  (scatter + compute + M1PR gather)         ║\n");
-        printf("╚════════════════════════════════════════════╝\n");
-    } else {
-        // Slave: time ONLY the MA computation
         double slave_elapsed = (slave_ta.tv_sec - slave_tb.tv_sec) +
                                (slave_ta.tv_nsec - slave_tb.tv_nsec) / 1e9;
 
+        printf("[Node %d] Partial vector p (%d elements):\n", my_id, my_p_len);
+        print_vector(my_p, my_p_len);
+        printf("[Node %d] MA computation time: %.6f sec\n\n", my_id, slave_elapsed);
+
+        // Append metadata: [node_id_as_float, elapsed_as_float]
+        my_p = (float *)realloc(my_p, (my_p_len + 2) * sizeof(float));
+        my_p[my_p_len]     = (float)my_id;
+        my_p[my_p_len + 1] = (float)slave_elapsed;
+        my_p_len += 2;
+    } else {
+        // MASTER: empty p, will be filled by M1PR gather
+        my_p = NULL;
+        my_p_len = 0;
+        printf("[Node 0] Master skips MA computation (no rows held)\n\n");
+    }
+
+    // ============================================================
+    // PHASE 3: M1PR — Many-to-One Personalized Reduction
+    // ============================================================
+    gather_tree(my_id, total_nodes, &my_p, &my_p_len, listening_socket, nodes);
+
+    // Master stops timer and prints summary
+    struct timespec time_after;
+    if (my_id == 0) {
+        clock_gettime(CLOCK_MONOTONIC, &time_after);
+        double total_elapsed = (time_after.tv_sec - time_before.tv_sec) +
+                               (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
+
+        // Parse rebuilt vector: each slave contributed (my_cols + 2) elements
+        // Layout: [p0...p_{cols-1}, node_id, elapsed] repeated per slave
+        int num_slaves = total_nodes - 1;
+        int block_size = n + 2;  // n cols + 2 metadata
+        double slave_times[MAX_NODES] = {0};
+        float *clean_p = (float *)malloc(num_slaves * n * sizeof(float));
+        int clean_len = 0;
+
+        for (int s = 0; s < num_slaves; s++) {
+            int offset = s * block_size;
+            if (offset + block_size <= my_p_len) {
+                // Copy the actual p values
+                memcpy(&clean_p[clean_len], &my_p[offset], n * sizeof(float));
+                clean_len += n;
+                // Extract metadata
+                int sid = (int)my_p[offset + n];
+                double t = (double)my_p[offset + n + 1];
+                slave_times[sid] = t;
+            }
+        }
+
+        // Print rebuilt vector p
         printf("╔════════════════════════════════════════════╗\n");
-        printf("║  Node %-2d — SLAVE RESULTS                   ║\n", my_id);
-        printf("╠════════════════════════════════════════════╣\n");
-        printf("║  Strategy:     %-8s %s    ║\n",
+        printf("║  MASTER — Rebuilt Full Vector p             ║\n");
+        printf("║  %d elements                                \n", clean_len);
+        printf("╚════════════════════════════════════════════╝\n");
+        print_vector(clean_p, clean_len);
+        printf("\n");
+
+        // SUMMARY TABLE
+        printf("╔══════════════════════════════════════════════════════════╗\n");
+        printf("║                    SUMMARY REPORT                       ║\n");
+        printf("╠══════════════════════════════════════════════════════════╣\n");
+        printf("║  Matrix:        %5d x %-5d                            ║\n", n, n);
+        printf("║  Q (MA order):  %-5d                                   ║\n", q);
+        printf("║  Total nodes:   %-3d  (1 master + %d slaves)             ║\n", total_nodes, total_nodes - 1);
+        printf("║  Strategy:      %-8s %s                        ║\n",
                use_tree ? "TREE" : "LINEAR",
                use_tree ? "O(log n)" : "O(n)    ");
-        printf("║  Q (MA order): %-5d                       ║\n", q);
-        printf("║  time_elapsed: %.6f sec              ║\n", slave_elapsed);
-        printf("║  (MA computation ONLY)                     ║\n");
+        printf("╠══════════════════════════════════════════════════════════╣\n");
+        printf("║  SLAVE COMPUTATION TIMES (MA only):                     ║\n");
+        for (int i = 1; i < total_nodes; i++) {
+            int sr = rows_for_node(i, n, total_nodes);
+            printf("║    Node %-2d:  %.6f sec  (%3d rows)                 ║\n",
+                   i, slave_times[i], sr);
+        }
+        printf("╠══════════════════════════════════════════════════════════╣\n");
+        printf("║  MASTER TOTAL TIME:                                     ║\n");
+        printf("║    %.6f sec                                          ║\n", total_elapsed);
+        printf("║    (1MPB scatter + slave MA + M1PR gather)              ║\n");
+        printf("╚══════════════════════════════════════════════════════════╝\n");
+
+        free(clean_p);
+    } else {
+        // Slave final report (elapsed already printed above)
+        printf("╔════════════════════════════════════════════╗\n");
+        printf("║  Node %-2d — SLAVE DONE                      ║\n", my_id);
         printf("╚════════════════════════════════════════════╝\n");
     }
 
     // Cleanup
     free(my_p);
-    if (my_id == 0) {
-        // scatter_tree already copied master's rows, free both separately
-        free_matrix(my_data, my_rows);
-        // full_matrix rows beyond my_rows were freed during scatter
-        // just free the top-level pointer
-        free(full_matrix);
-    } else {
+    if (my_id != 0) {
         free_matrix(my_data, my_rows);
     }
     close(listening_socket);

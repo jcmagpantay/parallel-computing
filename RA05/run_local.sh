@@ -47,6 +47,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Quick test mode: bash run_local.sh test
+if [ "${1}" = "test" ]; then
+    echo ""
+    echo "=== Running standalone MA test ==="
+    "$SCRIPT_DIR/lab05" test
+    exit $?
+fi
+
 N=${1:-1024}            # Matrix size
 SLAVES=${2:-8}           # Number of slave processes
 TOTAL_NODES=$((SLAVES + 1)) # Total participating nodes (1 master + slaves)
