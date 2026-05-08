@@ -132,7 +132,7 @@ for idx in "${!SECTIONS[@]}"; do
 
     for n in "${MATRIX_SIZES[@]}"; do
         for t in "${SLAVE_COUNTS[@]}"; do
-            timeout=$(get_timeout $n)
+
 
             echo -n "  n=$n  t=$t ... "
 

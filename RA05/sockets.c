@@ -239,17 +239,22 @@ float* compute_ma(int **submatrix, int local_rows, int col_len, int q) {
     if (q <= 0) return p;
 
     for (int r = 0; r < local_rows; r++) {
-        // submatrix[r] contains all m values of original column j
+        int *col = submatrix[r];
+
+        // Prime the sliding window with the first q elements
+        float window_sum = 0;
+        for (int k = 0; k < q; k++)
+            window_sum += col[k];
+
         float sum_sq = 0;
         for (int i = q; i < col_len; i++) {
-            // moving average of submatrix[r][i-q..i-1]
-            float ma = 0;
-            for (int k = i - q; k < i; k++) {
-                ma += submatrix[r][k];
-            }
-            ma /= q;
-            float diff = submatrix[r][i] - ma;
+            // ma = average of col[i-q .. i-1], maintained as sliding sum
+            float ma = window_sum / q;
+            float diff = col[i] - ma;
             sum_sq += diff * diff;
+
+            // Slide: add col[i], remove col[i-q]
+            window_sum += col[i] - col[i - q];
         }
         p[r] = sqrtf(sum_sq) / (col_len - q);
     }
