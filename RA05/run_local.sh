@@ -1,5 +1,5 @@
 #!/bin/bash
-# RA04 Local Mode: Binomial Tree Scatter
+# RA05 Local Mode: 1MPB Scatter + MA Compute + M1PR Gather
 # Each node gets its own terminal window
 # Auto-detects OS: macOS (Terminal.app) or Linux (gnome-terminal)
 
@@ -12,7 +12,7 @@ open_terminal() {
     local log_file="$3"
 
     local tmp_script
-    tmp_script=$(mktemp /tmp/ra04_XXXXXX)
+    tmp_script=$(mktemp /tmp/ra05_XXXXXX)
     cat > "$tmp_script" << TMPEOF
 #!/bin/bash
 echo -ne "\033]0;${title}\007"
@@ -40,8 +40,8 @@ TMPEOF
     fi
 }
 
-echo "=== Compiling lab04 ==="
-gcc -o "$SCRIPT_DIR/lab04" "$SCRIPT_DIR/sockets.c" -lm
+echo "=== Compiling lab05 ==="
+gcc -o "$SCRIPT_DIR/lab05" "$SCRIPT_DIR/sockets.c" -lm
 if [ $? -ne 0 ]; then
     echo "Compilation failed!"
     exit 1
@@ -68,7 +68,7 @@ echo "=== Launching $((TOTAL_NODES - 1)) slave nodes ==="
 for i in $(seq 1 $((TOTAL_NODES - 1))); do
     PORT=$((BASE_PORT + i))
     LOG_FILE="Node_${i}_Slave_${PORT}.log"
-    open_terminal "NODE $i (Slave)" "./lab04 $N $i local $TOTAL_NODES $STRATEGY $AFFINITY" "$LOG_FILE"
+    open_terminal "NODE $i (Slave)" "./lab05 $N $i local $TOTAL_NODES $STRATEGY $AFFINITY" "$LOG_FILE"
     echo "  Opened terminal for Node $i (Logging to $LOG_FILE)"
 done
 
@@ -79,7 +79,7 @@ sleep 2
 echo ""
 echo "=== Launching master node ==="
 LOG_FILE="Node_0_Master_${BASE_PORT}.log"
-open_terminal "NODE 0 (Master)" "./lab04 $N 0 local $TOTAL_NODES $STRATEGY $AFFINITY" "$LOG_FILE"
+open_terminal "NODE 0 (Master)" "./lab05 $N 0 local $TOTAL_NODES $STRATEGY $AFFINITY" "$LOG_FILE"
 
 echo ""
 echo "=== All $TOTAL_NODES terminals launched! ==="

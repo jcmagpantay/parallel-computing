@@ -1,5 +1,5 @@
 #!/bin/bash
-# RA04 Remote Mode: Binomial Tree Scatter — Dynamic SSH deployment
+# RA05 Remote Mode: 1MPB Scatter + MA Compute + M1PR Gather — Dynamic SSH deployment
 # Config format (config.remote.txt):
 #   Line 0: master_ip     (PC 0)
 #   Line 1: slave_ip      (PC 1)
@@ -10,7 +10,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.remote.txt"
 GENERATED_CONFIG="$SCRIPT_DIR/config.generated.txt"
-BINARY="$SCRIPT_DIR/lab04"
+BINARY="$SCRIPT_DIR/lab05"
 
 # --- Terminal launcher (OS-agnostic) ---
 open_terminal() {
@@ -19,7 +19,7 @@ open_terminal() {
     local log_file="$3"
 
     local tmp_script
-    tmp_script=$(mktemp /tmp/ra04_XXXXXX)
+    tmp_script=$(mktemp /tmp/ra05_XXXXXX)
     cat > "$tmp_script" << TMPEOF
 #!/bin/bash
 echo -ne "\033]0;${title}\007"
@@ -73,7 +73,7 @@ else
 fi
 
 echo "============================================"
-echo "  RA04 Remote Multiplexing Mode"
+echo "  RA05 Remote Multiplexing Mode"
 echo "  Matrix: ${N}x${N} | Slaves: $SLAVES (Total Nodes: $TOTAL_NODES)"
 echo "  User: $SSH_USER | Strategy: $STRATEGY"
 echo "  Workspace: $REMOTE_WORKSPACE"
@@ -81,7 +81,7 @@ echo "============================================"
 echo ""
 
 # --- Compile ---
-echo "=== Step 1: Compiling lab04 ==="
+echo "=== Step 1: Compiling lab05 ==="
 gcc -o "$BINARY" "$SCRIPT_DIR/sockets.c" -lm
 if [ $? -ne 0 ]; then
     echo "Compilation failed!"
@@ -209,7 +209,7 @@ for i in $(seq 1 $SLAVES); do
     echo "  Starting Node $i on $IP:$PORT... (Logging remotely to $LOG_FILE)"
     
     # Payload tells the remote PC to create its own logs folder, run lab04, and duplicate the stdout to a remote log file.
-    REMOTE_CMD="mkdir -p $REMOTE_WORKSPACE/logs && cd $REMOTE_WORKSPACE && ./lab04 $N $i remote $TOTAL_NODES $STRATEGY | tee $REMOTE_WORKSPACE/logs/$LOG_FILE"
+    REMOTE_CMD="mkdir -p $REMOTE_WORKSPACE/logs && cd $REMOTE_WORKSPACE && ./lab05 $N $i remote $TOTAL_NODES $STRATEGY | tee $REMOTE_WORKSPACE/logs/$LOG_FILE"
     open_terminal "NODE $i ($IP:$PORT via SSH)" "eval \"$SSH_PREFIX -t $SSH_USER@$IP '$REMOTE_CMD'\"" "$LOG_FILE"
 done
 
@@ -222,7 +222,7 @@ echo "=== Step 7: Launching master === "
 MASTER_IP="${ALL_IPS[0]}"
 MASTER_PORT="${ALL_PORTS[0]}"
 LOG_FILE="Node_0_Master_${MASTER_IP}_${MASTER_PORT}.log"
-open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab04 $N 0 remote $TOTAL_NODES $STRATEGY" "$LOG_FILE"
+open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab05 $N 0 remote $TOTAL_NODES $STRATEGY" "$LOG_FILE"
 
 echo ""
 echo "============================================"

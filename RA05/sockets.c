@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <math.h>
 
 #define MAX_NODES 256
 
@@ -205,7 +206,78 @@ void free_matrix(int **M, int rows) {
     free(M);
 }
 
-// Compute how many rows a subtree of nodes should own
+// Compute Q from student number (SS=98) and matrix size, same as RA01
+int compute_q(int n) {
+    int ss = 98;
+    float fmax = (float)n/2;
+    float fmin = (float)ss * n / 100.0f;
+    float cap  = 3.0f * n / 4.0f;
+    if (fmin > cap) fmin = cap;
+    if (fmax > fmin) return (int)fmax;
+    return (int)fmin;
+}
+
+// Moving average from RA01: average of x[i-q..i-1][j] (1-indexed logic)
+float moving_ave(int **x, int i, int j, int q) {
+    float sum = 0;
+    for (int k = i - q; k <= i - 1; k++) {
+        sum += x[k-1][j-1];
+    }
+    return sum / q;
+}
+
+// Compute Order Q MA MSE for a local submatrix (rows x cols)
+// Returns a float vector of length cols
+float* compute_ma(int **submatrix, int rows, int cols, int q) {
+    float *p = (float *)calloc(cols, sizeof(float));
+    // Clamp q to what we can actually compute with our local rows
+    if (q >= rows) q = rows - 1;
+    if (q <= 0) {
+        // Can't compute MA with 0 or negative q
+        return p;
+    }
+    for (int j = 1; j <= cols; j++) {
+        float sum = 0;
+        for (int i = q + 1; i <= rows; i++) {
+            float ma = moving_ave(submatrix, i, j, q);
+            float diff = submatrix[i-1][j-1] - ma;
+            sum += diff * diff;
+        }
+        p[j-1] = sqrtf(sum) / (rows - q);
+    }
+    return p;
+}
+
+// Send a float vector over socket (network-safe)
+void send_vector(int sock, float *vec, int len) {
+    uint32_t nl = htonl((uint32_t)len);
+    send_all(sock, &nl, sizeof(nl));
+    // Send floats as raw bytes (same architecture assumed, or use fixed encoding)
+    send_all(sock, vec, len * sizeof(float));
+}
+
+// Receive a float vector over socket
+float* recv_vector(int sock, int *out_len) {
+    uint32_t nl;
+    recv_all(sock, &nl, sizeof(nl));
+    int len = (int)ntohl(nl);
+    float *vec = (float *)malloc(len * sizeof(float));
+    recv_all(sock, vec, len * sizeof(float));
+    *out_len = len;
+    return vec;
+}
+
+void print_vector(float *vec, int len) {
+    if (len > 20) {
+        printf("  [vector of %d elements — too large to display]\n", len);
+        return;
+    }
+    printf("  ");
+    for (int i = 0; i < len; i++) {
+        printf("%.4f ", vec[i]);
+    }
+    printf("\n");
+}
 int rows_for_subtree(int start_node, int subtree_size, int n, int total_nodes) {
     int total = 0;
     for (int i = start_node; i < start_node + subtree_size && i < total_nodes; i++) {
@@ -479,6 +551,76 @@ void scatter_tree(int my_id, int total_nodes, int n,
     *out_cols = cols;
 }
 
+// M1PR: Many-to-One Personalized Reduction via reverse binomial tree
+// Each node has a partial vector p. The tree reverses the scatter:
+// stride goes 1 → 2 → 4 → ... (opposite of scatter)
+// Nodes that received in scatter now SEND back, and vice versa.
+// Parent concatenates child's vector onto its own.
+void gather_tree(int my_id, int total_nodes,
+                 float **my_p, int *my_p_len,
+                 int listening_socket, NodeEntry nodes[]) {
+    int hp2 = 1;
+    while (hp2 < total_nodes) hp2 *= 2;
+    int total_rounds = 0;
+    { int tmp = hp2; while (tmp > 1) { total_rounds++; tmp /= 2; } }
+
+    int round = 0;
+
+    printf("┌─────────────────────────────────────────┐\n");
+    printf("   M1PR GATHER: %d rounds (log₂%d)          \n", total_rounds, total_nodes);
+    printf("└─────────────────────────────────────────┘\n\n");
+
+    // Reverse of scatter: stride goes 1, 2, 4, ...
+    for (int stride = 1; stride < hp2; stride *= 2) {
+        round++;
+
+        // In scatter, node (my_id + stride) received from my_id.
+        // In gather, node (my_id + stride) SENDS to my_id.
+        int child = my_id + stride;
+        int parent = my_id - stride;
+
+        // Am I a receiver (parent) this round?
+        if (child < total_nodes && (my_id % (stride * 2)) == 0) {
+            printf("──── Round %d/%d (stride=%d) ────────────────\n", round, total_rounds, stride);
+            printf("  Node %d: Waiting for vector from Node %d...\n", my_id, child);
+
+            struct sockaddr_in addr;
+            int addrlen = sizeof(addr);
+            int conn = accept(listening_socket, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
+            if (conn < 0) { perror("Accept failed in gather"); return; }
+
+            int child_len = 0;
+            float *child_p = recv_vector(conn, &child_len);
+            close(conn);
+
+            // Concatenate: my_p = [my_p | child_p]
+            int new_len = *my_p_len + child_len;
+            *my_p = (float *)realloc(*my_p, new_len * sizeof(float));
+            memcpy((*my_p) + *my_p_len, child_p, child_len * sizeof(float));
+            *my_p_len = new_len;
+            free(child_p);
+
+            printf("  ✓ Received %d elements from Node %d, now holding %d elements\n\n",
+                   child_len, child, new_len);
+        }
+
+        // Am I a sender (child) this round?
+        if (parent >= 0 && (my_id % (stride * 2)) == stride) {
+            printf("──── Round %d/%d (stride=%d) ────────────────\n", round, total_rounds, stride);
+            printf("  Node %d ──→ Node %d (sending %d elements)\n", my_id, parent, *my_p_len);
+
+            int sock = connect_to(nodes[parent].ip, nodes[parent].port);
+            if (sock < 0) {
+                printf("  ✗ Failed to connect to Node %d!\n", parent);
+                return;
+            }
+            send_vector(sock, *my_p, *my_p_len);
+            close(sock);
+            printf("  ✓ Sent!\n\n");
+        }
+    }
+}
+
 // CORE AFFINE code.
 // i used ai here to help me make this code functional in both mac and linux
 void pin_to_core(int core_id) {
@@ -611,8 +753,8 @@ int main(int argc, char *argv[]) {
         printf("\n");
     }
 
-    // Check the time
-    struct timespec time_before, time_after;
+    // Check the time (master only — slaves time differently)
+    struct timespec time_before;
     int time_started = 0;
 
     if (my_id == 0) {
@@ -643,55 +785,96 @@ int main(int argc, char *argv[]) {
     print_matrix(my_data, my_rows, my_cols);
     printf("\n");
 
-    // Send acknowledgement to master as a slave
-    if (my_id != 0) {
-        printf("[Node %d] Sending ack to Master (Node 0) at %s:%d\n",
-               my_id, nodes[0].ip, nodes[0].port);
-        int sock = connect_to(nodes[0].ip, nodes[0].port);
-        if (sock >= 0) {
-            send_all(sock, "ack", 3);
-            close(sock);
-            printf("[Node %d] ✓ Ack sent.\n\n", my_id);
-        }
+    // ============================================================
+    // PHASE 2: Compute Order Q Moving Averages on local submatrix
+    // ============================================================
+    int q = compute_q(n);
+    printf("[Node %d] Computing Order Q=%d Moving Averages on %d rows x %d cols...\n",
+           my_id, q, my_rows, my_cols);
 
+    // Slave timing: start ONLY around MA computation
+    struct timespec slave_tb, slave_ta;
+    if (my_id != 0) {
+        clock_gettime(CLOCK_MONOTONIC, &slave_tb);
+    }
+
+    float *my_p = compute_ma(my_data, my_rows, my_cols, q);
+    int my_p_len = my_cols;
+
+    if (my_id != 0) {
+        clock_gettime(CLOCK_MONOTONIC, &slave_ta);
+    }
+
+    printf("[Node %d] Partial vector p (%d elements):\n", my_id, my_p_len);
+    print_vector(my_p, my_p_len);
+    printf("\n");
+
+    // ============================================================
+    // PHASE 3: M1PR — Many-to-One Personalized Reduction
+    // Reverse binomial tree to send partial p vectors back to master
+    // ============================================================
+    gather_tree(my_id, total_nodes, &my_p, &my_p_len, listening_socket, nodes);
+
+    // Master stops its timer after full vector p is rebuilt
+    struct timespec time_after;
+    if (my_id == 0) {
         clock_gettime(CLOCK_MONOTONIC, &time_after);
     }
 
-    // Master collects acks
+    // Master prints the rebuilt full vector p
     if (my_id == 0) {
-        printf("[Node 0] Waiting for acks from %d slaves...\n", total_nodes - 1);
-        for (int i = 0; i < total_nodes - 1; i++) {
-            struct sockaddr_in addr;
-            int addrlen = sizeof(addr);
-            int conn = accept(listening_socket, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
-            if (conn < 0) { perror("Accept failed"); continue; }
-
-            char ack_buf[16] = {0};
-            recv_all(conn, ack_buf, 3);
-            close(conn);
-            printf("  ✓ Ack %d/%d received\n", i + 1, total_nodes - 1);
-        }
-
-        clock_gettime(CLOCK_MONOTONIC, &time_after);
-        printf("\n[Node 0] All %d slaves acknowledged.\n\n", total_nodes - 1);
+        printf("╔════════════════════════════════════════════╗\n");
+        printf("║  MASTER — Rebuilt Full Vector p             ║\n");
+        printf("║  %d elements                                \n", my_p_len);
+        printf("╚════════════════════════════════════════════╝\n");
+        print_vector(my_p, my_p_len);
+        printf("\n");
     }
 
     // Time results
-    double time_elapsed = (time_after.tv_sec - time_before.tv_sec) +
-                          (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
+    if (my_id == 0) {
+        // Master: time from before scatter to after full p is rebuilt
+        double time_elapsed = (time_after.tv_sec - time_before.tv_sec) +
+                              (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
 
-    printf("╔════════════════════════════════════════════╗\n");
-    printf("║  Node %-2d — RESULTS                         ║\n", my_id);
-    printf("╠════════════════════════════════════════════╣\n");
-    printf("║  Strategy:     %-8s %s    ║\n",
-           use_tree ? "TREE" : "LINEAR",
-           use_tree ? "O(log n)" : "O(n)    ");
-    printf("║  time_elapsed: %.6f sec              ║\n", time_elapsed);
-    printf("╚════════════════════════════════════════════╝\n");
+        printf("╔════════════════════════════════════════════╗\n");
+        printf("║  Node 0  — MASTER RESULTS                  ║\n");
+        printf("╠════════════════════════════════════════════╣\n");
+        printf("║  Strategy:     %-8s %s    ║\n",
+               use_tree ? "TREE" : "LINEAR",
+               use_tree ? "O(log n)" : "O(n)    ");
+        printf("║  Q (MA order): %-5d                       ║\n", q);
+        printf("║  time_elapsed: %.6f sec              ║\n", time_elapsed);
+        printf("║  (scatter + compute + M1PR gather)         ║\n");
+        printf("╚════════════════════════════════════════════╝\n");
+    } else {
+        // Slave: time ONLY the MA computation
+        double slave_elapsed = (slave_ta.tv_sec - slave_tb.tv_sec) +
+                               (slave_ta.tv_nsec - slave_tb.tv_nsec) / 1e9;
+
+        printf("╔════════════════════════════════════════════╗\n");
+        printf("║  Node %-2d — SLAVE RESULTS                   ║\n", my_id);
+        printf("╠════════════════════════════════════════════╣\n");
+        printf("║  Strategy:     %-8s %s    ║\n",
+               use_tree ? "TREE" : "LINEAR",
+               use_tree ? "O(log n)" : "O(n)    ");
+        printf("║  Q (MA order): %-5d                       ║\n", q);
+        printf("║  time_elapsed: %.6f sec              ║\n", slave_elapsed);
+        printf("║  (MA computation ONLY)                     ║\n");
+        printf("╚════════════════════════════════════════════╝\n");
+    }
 
     // Cleanup
-    free_matrix(my_data, my_rows);
-    if (my_id == 0 && full_matrix) free_matrix(full_matrix, n);
+    free(my_p);
+    if (my_id == 0) {
+        // scatter_tree already copied master's rows, free both separately
+        free_matrix(my_data, my_rows);
+        // full_matrix rows beyond my_rows were freed during scatter
+        // just free the top-level pointer
+        free(full_matrix);
+    } else {
+        free_matrix(my_data, my_rows);
+    }
     close(listening_socket);
     printf("[Node %d] Shutting down.\n", my_id);
 

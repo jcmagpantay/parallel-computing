@@ -1,5 +1,5 @@
 #!/bin/bash
-# RA04 Remote Mode: Binomial Tree Scatter — Dynamic SSH deployment
+# RA05 Remote Mode: 1MPB + MA + M1PR — Dynamic SSH deployment
 # Auto-detects OS: macOS (Terminal.app) or Linux (gnome-terminal)
 #
 # Config format (config.remote.txt):
@@ -12,7 +12,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.remote.txt"
-BINARY="$SCRIPT_DIR/lab04"
+BINARY="$SCRIPT_DIR/lab05"
 
 # --- Terminal launcher (OS-agnostic) ---
 open_terminal() {
@@ -21,7 +21,7 @@ open_terminal() {
     local log_file="$3"
 
     local tmp_script
-    tmp_script=$(mktemp /tmp/ra04_XXXXXX)
+    tmp_script=$(mktemp /tmp/ra05_XXXXXX)
     cat > "$tmp_script" << TMPEOF
 #!/bin/bash
 echo -ne "\033]0;${title}\007"
@@ -70,7 +70,7 @@ else
 fi
 
 echo "============================================"
-echo "  RA04 Remote Mode"
+echo "  RA05 Remote Mode"
 echo "  Matrix: ${N}x${N} | User: $SSH_USER"
 echo "  Strategy: $STRATEGY"
 echo "  Config: $CONFIG"
@@ -79,7 +79,7 @@ echo "============================================"
 echo ""
 
 # --- Compile ---
-echo "=== Step 1: Compiling lab04 ==="
+echo "=== Step 1: Compiling lab05 ==="
 gcc -o "$BINARY" "$SCRIPT_DIR/sockets.c" -lm
 if [ $? -ne 0 ]; then
     echo "Compilation failed!"
@@ -178,7 +178,7 @@ for i in $(seq 1 $((NODE_COUNT - 1))); do
     # 2. We use `xterm` instead of `gnome-terminal`. GNOME Terminal strictly enforces Wayland Desktop security 
     #    and D-Bus restrictions, throwing hundreds of auth errors when launched via SSH. xterm ignores this.
     # 3. We pipe the raw bash text straight into the remote SSH bash interpreter.
-    REMOTE_SCRIPT="export DISPLAY=:0; export XAUTHORITY=\$(ls /run/user/\$(id -u)/gdm/Xauthority /run/user/\$(id -u)/Xauthority \$HOME/.Xauthority 2>/dev/null | head -n 1); xterm -title \"NODE $i\" -hold -e \"~/lab04 $N $i remote $NODE_COUNT $STRATEGY\""
+    REMOTE_SCRIPT="export DISPLAY=:0; export XAUTHORITY=\$(ls /run/user/\$(id -u)/gdm/Xauthority /run/user/\$(id -u)/Xauthority \$HOME/.Xauthority 2>/dev/null | head -n 1); xterm -title \"NODE $i\" -hold -e \"~/lab05 $N $i remote $NODE_COUNT $STRATEGY\""
     
     eval "echo \"\$REMOTE_SCRIPT\" | ${SSH_PREFIX} -T ${SSH_USER}@${IP} bash" &
 done
@@ -190,7 +190,7 @@ echo ""
 # --- Launch master locally ---
 echo "=== Step 6: Launching master ==="
 LOG_FILE="Node_0_Master_${MASTER_IP}_${MASTER_PORT}.log"
-open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab04 $N 0 remote $NODE_COUNT $STRATEGY" "$LOG_FILE"
+open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab05 $N 0 remote $NODE_COUNT $STRATEGY" "$LOG_FILE"
 
 echo ""
 echo "============================================"
