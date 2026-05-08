@@ -81,8 +81,10 @@ for i in $(seq 1 $((TOTAL_NODES - 1))); do
     echo "  Opened terminal for Node $i (Logging to $LOG_FILE)"
 done
 
-# Give slaves time to start listening
-sleep 2
+# Give slaves time to start listening (scale with slave count for slow Linux terminals)
+SLAVE_WAIT=$(( 1 + SLAVES / 2 ))
+[ $SLAVE_WAIT -gt 15 ] && SLAVE_WAIT=15
+sleep $SLAVE_WAIT
 
 # Launch master node (node 0)
 echo ""

@@ -3,25 +3,25 @@
 #include <time.h>
 #include <math.h>
 
-float moving_ave(int **x, int i, int j, int q) {
-	float sum = 0;
-	for (int k = i - q; k <= i - 1; k++) {
-		sum += x[k-1][j-1];
-	}
-	return sum/q;
-}
-
 float* mse_ma(int** x, int q, int n) {
-	float *p = (float*)malloc(n*sizeof(float));
+	float *p = (float*)malloc(n * sizeof(float));
 
-	float sum = 0;
-	// p_j loop
 	for (int j = 1; j <= n; j++) {
-		sum = 0;
+		// Prime the sliding window with the first q elements of column j
+		float window_sum = 0;
+		for (int k = 1; k <= q; k++)
+			window_sum += x[k-1][j-1];
+
+		float sum_sq = 0;
 		for (int i = q + 1; i <= n; i++) {
-			sum += pow(x[i-1][j-1] - moving_ave(x, i, j, q), 2);
+			float ma = window_sum / q;
+			float diff = x[i-1][j-1] - ma;
+			sum_sq += diff * diff;
+
+			// Slide: add x[i][j], remove x[i-q][j]
+			window_sum += x[i-1][j-1] - x[i-q-1][j-1];
 		}
-		p[j-1] = sqrt(sum) / (n - q);
+		p[j-1] = sqrtf(sum_sq) / (n - q);
 	}
 
 	return p;

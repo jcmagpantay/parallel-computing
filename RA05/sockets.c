@@ -117,7 +117,7 @@ int connect_to(const char *ip, int port) {
 
     // allow for retries in case of unsynchronized setups
     // this makes for remote ssh to be easier without too many errors.
-    int retries = 20;
+    int retries = 60;  // 60 × 0.5s = 30s max wait (needed for slow Linux terminal spawning)
     while (connect(sock_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         retries--;
         if (retries == 0) {
