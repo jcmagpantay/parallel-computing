@@ -498,12 +498,13 @@ void scatter_tree(int my_id, int total_nodes, int n,
                 int send_rows = rows_for_subtree(target, target_subtree_size, n, total_nodes);
                 int keep_rows = my_rows - send_rows;
 
-                // Used AI here for pretty printing.
                 printf("──── Round %d/%d (stride=%d) ────────────────\n", round, total_rounds, stride);
                 printf("  Node %d ──→ Node %d\n", my_id, target);
                 printf("  Splitting: send %d rows, keep %d rows\n", send_rows, keep_rows);
-                printf("\n  Submatrix being sent to Node %d:\n", target);
-                print_matrix(&my_data[keep_rows], send_rows, cols);
+                if (cols <= 20) {
+                    printf("\n  Submatrix being sent to Node %d:\n", target);
+                    print_matrix(&my_data[keep_rows], send_rows, cols);
+                }
 
                 int sock = connect_to(nodes[target].ip, nodes[target].port);
                 if (sock < 0) {
@@ -530,8 +531,6 @@ void scatter_tree(int my_id, int total_nodes, int n,
         // node is waiting to receive data.
         } else {
             // checks if it is their turn in the local group per stride
-            // the correct receiver is always exactly at the middle of the local group
-            // easier to draw tbh
             if ((my_id % (stride * 2)) == stride) {
                 printf("──── Round %d/%d (stride=%d) ────────────────\n", round, total_rounds, stride);
                 printf("  Node %d: Waiting to receive...\n", my_id);
@@ -550,12 +549,12 @@ void scatter_tree(int my_id, int total_nodes, int n,
                 close(conn);
                 has_data = 1;
 
-                // Determine which node we got data from
-                // it's just a mirror of the int target = my_id + stride
                 int parent = my_id - stride;
                 printf("  ✓ Received %d rows x %d cols from Node %d\n", my_rows, cols, parent >= 0 ? parent : 0);
-                printf("\n  Received submatrix:\n");
-                print_matrix(my_data, my_rows, cols);
+                if (cols <= 20) {
+                    printf("\n  Received submatrix:\n");
+                    print_matrix(my_data, my_rows, cols);
+                }
                 printf("\n");
             }
         }
@@ -877,18 +876,27 @@ int main(int argc, char *argv[]) {
             original = create_matrix(n);
         }
 
-        printf("[Node 0] Generated %d x %d matrix X:\n", n, n);
-        print_matrix(original, n, n);
-        printf("\n");
+        printf("[Node 0] Generated %d x %d matrix X%s\n", n, n,
+               n <= 20 ? ":" : " (too large to print)");
+        if (n <= 20) { print_matrix(original, n, n); printf("\n"); }
 
-        // Transpose: each row of X^T = one full column of X
-        // This way, distributing ROWS of X^T gives each slave complete columns
-        full_matrix = transpose_matrix(original, n);
-        free_matrix(original, n);
+        // Transpose in-place (swap X[i][j] <-> X[j][i])
+        // Avoids allocating a second n×n block — halves peak memory.
+        printf("[Node 0] Transposing in-place...\n");
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                int tmp = original[i][j];
+                original[i][j] = original[j][i];
+                original[j][i] = tmp;
+            }
+        }
+        full_matrix = original;  // reuse same allocation
 
-        printf("[Node 0] Transposed to %d x %d matrix X^T (rows = columns of X):\n", n, n);
-        print_matrix(full_matrix, n, n);
-        printf("\n");
+        if (n <= 20) {
+            printf("[Node 0] Transposed X^T:\n");
+            print_matrix(full_matrix, n, n);
+            printf("\n");
+        }
     }
 
     // Check the time (master only — slaves time differently)
