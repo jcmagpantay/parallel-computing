@@ -80,12 +80,18 @@ int setup_server(int port) {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(port);
 
-    if (bind(listening_socket, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Bind failed");
-        exit(EXIT_FAILURE);
+    // Retry bind for up to 15s in case port is in TIME_WAIT from a previous run
+    int bind_retries = 30;
+    while (bind(listening_socket, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        if (--bind_retries == 0) {
+            perror("Bind failed (port stuck in TIME_WAIT?)");
+            exit(EXIT_FAILURE);
+        }
+        fprintf(stderr, "[Port %d] Bind failed, retrying in 0.5s...\n", port);
+        usleep(500000);
     }
 
-    if (listen(listening_socket, 10) < 0) {
+    if (listen(listening_socket, 32) < 0) {
         perror("Listen failed");
         exit(EXIT_FAILURE);
     }

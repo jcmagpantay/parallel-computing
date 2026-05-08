@@ -104,6 +104,20 @@ EOF
         pkill -f "bash /tmp/ra05_" 2>/dev/null
     fi
 
+    # Wait for ports 12000-12020 to drain (important on Linux where TIME_WAIT lingers)
+    local drain_wait=0
+    while [ $drain_wait -lt 10 ]; do
+        if command -v ss &>/dev/null; then
+            active=$(ss -tnp 2>/dev/null | grep -E '120[0-9]{2}' | grep -c 'lab05' || true)
+        elif command -v netstat &>/dev/null; then
+            active=$(netstat -tnp 2>/dev/null | grep -E '120[0-9]{2}' | grep -c 'lab05' || true)
+        else
+            active=0
+        fi
+        [ "$active" -eq 0 ] && break
+        sleep 1
+        drain_wait=$((drain_wait + 1))
+    done
     sleep 1
 }
 
