@@ -81,28 +81,44 @@ parse_master_log() {
     echo "${master_time},${slowest},${fastest}"
 }
 
-# --- Helper: kill leftover lab05 processes between runs ---
+# --- Helper: kill leftover lab05 processes and close spawned terminals ---
 cleanup_processes() {
-    pkill -f "lab05.*local" 2>/dev/null
+    # Kill any lab05 processes
+    pkill -f "lab05" 2>/dev/null
+
+    # Kill the bash processes running /tmp/ra05_ scripts
+    # This causes the Terminal windows to close since their shell exits
+    pkill -f "/tmp/ra05_" 2>/dev/null
+
     sleep 1
-    # Close any Terminal windows opened by previous run
-    # (only the ones running lab05 scripts)
-    osascript -e '
-    tell application "Terminal"
-        set winList to every window
-        repeat with w in winList
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS: force-close any Terminal windows still stuck on "Press Enter"
+        # After killing the scripts above, windows may remain with dead shells.
+        # Close ALL Terminal windows whose custom title contains "NODE".
+        osascript <<'EOF' 2>/dev/null
+tell application "Terminal"
+    set wlist to every window
+    repeat with w in wlist
+        try
+            set wname to custom title of first tab of w
+            if wname contains "NODE" then
+                close w saving no
+            end if
+        on error
             try
-                set tabProcs to processes of first tab of w
-                repeat with p in tabProcs
-                    if p contains "lab05" or p contains "ra05" then
-                        close w
-                        exit repeat
-                    end if
-                end repeat
+                close w saving no
             end try
-        end repeat
-    end tell
-    ' 2>/dev/null
+        end try
+    end repeat
+end tell
+EOF
+    else
+        # Linux: kill gnome-terminal windows from our scripts
+        pkill -f "gnome-terminal.*ra05_" 2>/dev/null
+        pkill -f "bash /tmp/ra05_" 2>/dev/null
+    fi
+
     sleep 1
 }
 
@@ -133,7 +149,7 @@ run_benchmark() {
             timeout=$(get_timeout $n)
 
             echo "┌─────────────────────────────────────────┐"
-            echo "│  n=$n  t=$t  ($RUNS runs, timeout=${timeout}s)"
+            echo "│  n=$n  t=$t  ($RUNS runs)"
             echo "└─────────────────────────────────────────┘"
 
             for run in $(seq 1 $RUNS); do
