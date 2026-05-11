@@ -1,7 +1,33 @@
 #!/bin/bash
 # RA05 Local Mode: 1MPB Scatter + MA Compute + M1PR Gather
-# Each node gets its own terminal window
-# Auto-detects OS: macOS (Terminal.app) or Linux (gnome-terminal)
+# Each node gets its own terminal window.
+# Auto-detects OS: macOS (Terminal.app) or Linux (xterm / x-terminal-emulator / gnome-terminal).
+#
+# Arguments:
+#   $1  matrix_size   — NxN matrix dimension                      (default: 1024)
+#   $2  slaves        — number of slave processes                  (default: 8)
+#   $3  strategy      — 'tree' or 'linear' broadcast               (default: tree)
+#   $4  affinity      — 'affine' (pin to cores) or 'no_affine'     (default: no_affine)
+#   $5  test          — pass literal 'test' to use a known 5x5 matrix for verification
+#
+# Usage examples:
+#   # Quickstart — standalone binary self-test, no terminals opened:
+#   bash run_local.sh test
+#
+#   # Default run — 1024x1024, 8 slaves, tree strategy, no affinity:
+#   bash run_local.sh
+#
+#   # Custom matrix + slaves:
+#   bash run_local.sh 512 4
+#
+#   # Custom strategy:
+#   bash run_local.sh 512 4 linear
+#
+#   # With CPU affinity pinning:
+#   bash run_local.sh 512 4 tree affine
+#
+#   # Full run with known 5x5 test matrix (verify correctness):
+#   bash run_local.sh 512 4 tree no_affine test
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

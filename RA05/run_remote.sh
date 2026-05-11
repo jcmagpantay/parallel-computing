@@ -1,11 +1,37 @@
 #!/bin/bash
 # RA05 Remote Mode: 1MPB Scatter + MA Compute + M1PR Gather — Dynamic SSH deployment
+#
 # Config format (config.remote.txt):
 #   Line 0: master_ip     (PC 0)
 #   Line 1: slave_ip      (PC 1)
 #   Line 2: slave_ip      (PC 2)
 #
-# Usage: bash run_remote.sh <matrix_size> <slaves> [strategy] [ssh_user] [ssh_password]
+# Arguments:
+#   $1  matrix_size   — NxN matrix dimension           (default: 1024)
+#   $2  slaves        — number of slave processes       (default: 12)
+#   $3  strategy      — 'tree' or 'linear' broadcast    (default: tree)
+#   $4  ssh_user      — SSH username on remote machines (default: current user)
+#   $5  ssh_password  — SSH password (requires sshpass) (default: useruser)
+#   $6  test          — pass literal 'test' to use a known 5x5 matrix for verification
+#
+# Usage examples:
+#   # Quickstart — standalone binary self-test, no SSH:
+#   bash run_remote.sh test
+#
+#   # Default run — 1024x1024, 12 slaves, tree strategy, current user:
+#   bash run_remote.sh
+#
+#   # Custom matrix + slaves:
+#   bash run_remote.sh 512 4
+#
+#   # Custom strategy:
+#   bash run_remote.sh 512 4 linear
+#
+#   # Custom SSH credentials:
+#   bash run_remote.sh 1024 8 tree labuser useruser
+#
+#   # Full distributed run with known 5x5 test matrix (verify correctness):
+#   bash run_remote.sh 1024 8 tree labuser useruser test
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.remote.txt"
@@ -71,6 +97,7 @@ TOTAL_NODES=$((SLAVES + 1))
 STRATEGY=${3:-tree}     # 'linear' or 'tree'
 SSH_USER=${4:-$(whoami)}
 SSH_PASS=${5:-"useruser"} # Defaults to lab password
+TEST_FLAG=${6:-}          # 'test' to use known 5x5 matrix
 OS_NAME=$(uname)
 
 BASE_PORT=12000
@@ -237,7 +264,7 @@ for i in $(seq 1 $SLAVES); do
     echo "  Starting Node $i on $IP:$PORT... (Logging remotely to $LOG_FILE)"
     
     # Payload tells the remote PC to create its own logs folder, run lab04, and duplicate the stdout to a remote log file.
-    REMOTE_CMD="mkdir -p $REMOTE_WORKSPACE/logs && cd $REMOTE_WORKSPACE && ./lab05 $N $i remote $TOTAL_NODES $STRATEGY | tee $REMOTE_WORKSPACE/logs/$LOG_FILE"
+    REMOTE_CMD="mkdir -p $REMOTE_WORKSPACE/logs && cd $REMOTE_WORKSPACE && ./lab05 $N $i remote $TOTAL_NODES $STRATEGY $TEST_FLAG | tee $REMOTE_WORKSPACE/logs/$LOG_FILE"
     open_terminal "NODE $i ($IP:$PORT via SSH)" "eval \"$SSH_PREFIX -t $SSH_USER@$IP '$REMOTE_CMD'\"" "$LOG_FILE"
 done
 
@@ -250,7 +277,7 @@ echo "=== Step 7: Launching master === "
 MASTER_IP="${ALL_IPS[0]}"
 MASTER_PORT="${ALL_PORTS[0]}"
 LOG_FILE="Node_0_Master_${MASTER_IP}_${MASTER_PORT}.log"
-open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab05 $N 0 remote $TOTAL_NODES $STRATEGY" "$LOG_FILE"
+open_terminal "NODE 0 (Master, $MASTER_IP:$MASTER_PORT)" "./lab05 $N 0 remote $TOTAL_NODES $STRATEGY $TEST_FLAG" "$LOG_FILE"
 
 echo ""
 echo "============================================"
