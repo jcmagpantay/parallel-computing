@@ -212,7 +212,7 @@ void free_matrix(int **M, int rows) {
     free(M);
 }
 
-// Compute Q from student number (SS=98) and matrix size, same as RA01
+// ra01 
 int compute_q(int n) {
     int ss = 98;
     float fmax = (float)n/2;
@@ -223,8 +223,6 @@ int compute_q(int n) {
     return (int)fmin;
 }
 
-// Transpose an n×n matrix: X^T[j][i] = X[i][j]
-// After transpose, each row of X^T contains all data for one column of X.
 int** transpose_matrix(int **M, int n) {
     int **T = (int **)malloc(n * sizeof(int *));
     for (int j = 0; j < n; j++) {
@@ -236,9 +234,7 @@ int** transpose_matrix(int **M, int n) {
     return T;
 }
 
-// Compute Order Q MA MSE on transposed submatrix.
-// Each row of the submatrix is a FULL original column (length = col_len).
-// Returns a float vector of length `local_rows` (one p[j] per assigned column).
+// compute ma for transposed matrix
 float* compute_ma(int **submatrix, int local_rows, int col_len, int q) {
     float *p = (float *)calloc(local_rows, sizeof(float));
     if (q >= col_len) q = col_len - 1;
@@ -247,19 +243,16 @@ float* compute_ma(int **submatrix, int local_rows, int col_len, int q) {
     for (int r = 0; r < local_rows; r++) {
         int *col = submatrix[r];
 
-        // Prime the sliding window with the first q elements
         float window_sum = 0;
         for (int k = 0; k < q; k++)
             window_sum += col[k];
 
         float sum_sq = 0;
         for (int i = q; i < col_len; i++) {
-            // ma = average of col[i-q .. i-1], maintained as sliding sum
             float ma = window_sum / q;
             float diff = col[i] - ma;
             sum_sq += diff * diff;
 
-            // Slide: add col[i], remove col[i-q]
             window_sum += col[i] - col[i - q];
         }
         p[r] = sqrtf(sum_sq) / (col_len - q);
@@ -298,8 +291,8 @@ void print_vector(float *vec, int len) {
     printf("\n");
 }
 
-// Master (node 0) gets 0 rows — only slaves compute.
-// Rows are distributed evenly among slaves (nodes 1..total_nodes-1).
+// master (node 0) gets 0 rows
+// rows are distributed evenly among slaves (nodes 1..total_nodes-1).
 int rows_for_node(int node_id, int n, int total_nodes) {
     if (node_id == 0) return 0;
     int num_slaves = total_nodes - 1;
@@ -580,11 +573,9 @@ void scatter_tree(int my_id, int total_nodes, int n,
     *out_cols = cols;
 }
 
-// M1PR: Many-to-One Personalized Reduction via reverse binomial tree
-// Each node has a partial vector p. The tree reverses the scatter:
-// stride goes 1 → 2 → 4 → ... (opposite of scatter)
-// Nodes that received in scatter now SEND back, and vice versa.
-// Parent concatenates child's vector onto its own.
+// m1pr, USING binomial tree once again
+// but in reverse...
+// from 1 to n/2
 void gather_tree(int my_id, int total_nodes,
                  float **my_p, int *my_p_len,
                  int listening_socket, NodeEntry nodes[]) {
@@ -603,12 +594,14 @@ void gather_tree(int my_id, int total_nodes,
     for (int stride = 1; stride < hp2; stride *= 2) {
         round++;
 
-        // In scatter, node (my_id + stride) received from my_id.
-        // In gather, node (my_id + stride) SENDS to my_id.
+        // since this is moving upwards the tree (gather)
+        // child sends
+        // parent receives
         int child = my_id + stride;
         int parent = my_id - stride;
 
-        // Am I a receiver (parent) this round?
+        // check if node is receiving this round
+        // it checks the first node of the node group
         if (child < total_nodes && (my_id % (stride * 2)) == 0) {
             printf("──── Round %d/%d (stride=%d) ────────────────\n", round, total_rounds, stride);
             printf("  Node %d: Waiting for vector from Node %d...\n", my_id, child);
@@ -616,42 +609,45 @@ void gather_tree(int my_id, int total_nodes,
             struct sockaddr_in addr;
             int addrlen = sizeof(addr);
             int conn = accept(listening_socket, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
-            if (conn < 0) { perror("Accept failed in gather"); return; }
+            if (conn < 0) { perror("Accept failed in gather_tree"); return; }
 
             int child_len = 0;
             float *child_p = recv_vector(conn, &child_len);
             close(conn);
 
-            // Concatenate: my_p = [my_p | child_p]
+            // expand array to fit child data
             int new_len = *my_p_len + child_len;
+
+            // this the first receive, copy child array
             if (*my_p == NULL) {
-                // First receive — just take child's data
                 *my_p = child_p;
                 child_p = NULL;  // prevent free below
             } else {
                 *my_p = (float *)realloc(*my_p, new_len * sizeof(float));
                 memcpy((*my_p) + *my_p_len, child_p, child_len * sizeof(float));
             }
+
             *my_p_len = new_len;
             if (child_p) free(child_p);
 
-            printf("  ✓ Received %d elements from Node %d, now holding %d elements\n\n",
+            printf("Received %d elements from Node %d, now holding %d elements\n\n",
                    child_len, child, new_len);
         }
 
-        // Am I a sender (child) this round?
+        // check if the node is sending this round
+        // the halfway node
         if (parent >= 0 && (my_id % (stride * 2)) == stride) {
             printf("──── Round %d/%d (stride=%d) ────────────────\n", round, total_rounds, stride);
             printf("  Node %d ──→ Node %d (sending %d elements)\n", my_id, parent, *my_p_len);
 
             int sock = connect_to(nodes[parent].ip, nodes[parent].port);
             if (sock < 0) {
-                printf("  ✗ Failed to connect to Node %d!\n", parent);
+                printf("Failed to connect to Node %d!\n", parent);
                 return;
             }
             send_vector(sock, *my_p, *my_p_len);
             close(sock);
-            printf("  ✓ Sent!\n\n");
+            printf("Sent!\n\n");
         }
     }
 }
@@ -677,18 +673,7 @@ void pin_to_core(int core_id) {
 #endif
 }
 
-// ============================================================
-// STANDALONE TEST: ./lab05 test
-// Known 5x5 matrix X[i][j] = i*j (1-indexed), q=3
-// Expected p: [1.414214, 2.828427, 4.242641, 5.656854, 7.071068]
-// ============================================================
 int run_test() {
-    printf("╔════════════════════════════════════════════╗\n");
-    printf("║  STANDALONE MA TEST (no networking)        ║\n");
-    printf("╠════════════════════════════════════════════╣\n");
-    printf("║  Matrix: 5x5  X[i][j] = i*j  (1-indexed)  ║\n");
-    printf("║  Q = 3                                     ║\n");
-    printf("╚════════════════════════════════════════════╝\n\n");
 
     int n = 5, q = 3;
     int **M = (int **)malloc(n * sizeof(int *));
@@ -709,7 +694,6 @@ int run_test() {
     print_matrix(T, n, n);
     printf("\n");
 
-    // compute_ma on transposed: local_rows=n (all columns), col_len=n (all original rows)
     float *p = compute_ma(T, n, n, q);
 
     float expected[] = {1.414214f, 2.828427f, 4.242641f, 5.656854f, 7.071068f};
@@ -732,9 +716,9 @@ int run_test() {
     }
 
     if (pass) {
-        printf("  ✓ ALL TESTS PASSED\n\n");
+        printf("The code is correct.\n\n");
     } else {
-        printf("\n  ✗ SOME TESTS FAILED\n\n");
+        printf("\nCheck logic, it's wrong.\n\n");
     }
 
     free(p);
@@ -857,14 +841,13 @@ int main(int argc, char *argv[]) {
     int listening_socket = setup_server(my_port);
     printf("[Node %d] Listening on port %d\n\n", my_id, my_port);
 
-    // Master creates the full matrix, then transposes for column-based distribution
+    // Create the full-matrix (master)
     int **full_matrix = NULL;
 
     if (my_id == 0) {
         int **original;
         if (test_mode) {
-            // Known test matrix: X[i][j] = (i+1)*(j+1), n=5, expected q=3
-            printf("[Node 0] TEST MODE — using known 5x5 matrix\n\n");
+            printf("[Node 0] TEST MODEEE\n\n");
             original = (int **)malloc(n * sizeof(int *));
             for (int i = 0; i < n; i++) {
                 original[i] = (int *)malloc(n * sizeof(int));
@@ -880,9 +863,8 @@ int main(int argc, char *argv[]) {
                n <= 20 ? ":" : " (too large to print)");
         if (n <= 20) { print_matrix(original, n, n); printf("\n"); }
 
-        // Transpose in-place (swap X[i][j] <-> X[j][i])
-        // Avoids allocating a second n×n block — halves peak memory.
-        printf("[Node 0] Transposing in-place...\n");
+        // Optimization from RA01, transpose d matrix
+        printf("[Node 0] Transposing matrix!!\n");
         for (int i = 0; i < n; i++) {
             for (int j = i + 1; j < n; j++) {
                 int tmp = original[i][j];
@@ -899,7 +881,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Check the time (master only — slaves time differently)
+    // Timechecker
     struct timespec time_before;
     int time_started = 0;
 
@@ -909,7 +891,7 @@ int main(int argc, char *argv[]) {
         time_started = 1;
     }
 
-    // Run the scatter strategy (linear / tree)
+    // Send data via scatter
     int **my_data = NULL;
     int my_rows = 0, my_cols = 0;
 
@@ -935,51 +917,50 @@ int main(int argc, char *argv[]) {
         printf("[Node %d] Master holds 0 rows (all distributed to slaves)\n\n", my_id);
     }
 
-    // ============================================================
-    // PHASE 2: Compute Order Q Moving Averages (SLAVES ONLY)
-    // Each slave appends 2 metadata floats: [node_id, elapsed_time]
-    // so its vector is (my_cols + 2) elements. M1PR concatenates
-    // everything; master strips metadata after gather.
-    // ============================================================
+    // Computation
     int q = test_mode ? 3 : compute_q(n);
     float *my_p = NULL;
     int my_p_len = 0;
 
     if (my_id != 0) {
-        // SLAVE: compute MA on transposed submatrix
-        // my_rows = number of original columns assigned to this slave
-        // my_cols = n = length of each original column (full sequence for MA)
         printf("[Node %d] Computing Order Q=%d Moving Averages on %d columns (each len %d)...\n",
                my_id, q, my_rows, my_cols);
 
         struct timespec slave_tb, slave_ta;
+
+        // Get slave time only for comp.
         clock_gettime(CLOCK_MONOTONIC, &slave_tb);
         my_p = compute_ma(my_data, my_rows, my_cols, q);
-        my_p_len = my_rows;  // one p[j] per assigned column
+        my_p_len = my_rows; 
         clock_gettime(CLOCK_MONOTONIC, &slave_ta);
 
-        double slave_elapsed = (slave_ta.tv_sec - slave_tb.tv_sec) +
-                               (slave_ta.tv_nsec - slave_tb.tv_nsec) / 1e9;
+        double slave_elapsed = (slave_ta.tv_sec - slave_tb.tv_sec) + (slave_ta.tv_nsec - slave_tb.tv_nsec) / 1e9;
 
+        // Print slave p
         printf("[Node %d] Partial vector p (%d elements):\n", my_id, my_p_len);
         print_vector(my_p, my_p_len);
         printf("[Node %d] MA computation time: %.6f sec\n\n", my_id, slave_elapsed);
 
-        // Append metadata: [node_id_as_float, elapsed_as_float]
-        my_p = (float *)realloc(my_p, (my_p_len + 2) * sizeof(float));
-        my_p[my_p_len]     = (float)my_id;
-        my_p[my_p_len + 1] = (float)slave_elapsed;
+        // ADD slave id and TIME in the array to be sent
+        // so i can rebuild the master p in ORDER!!
+        // array format:
+            // [<id>,<time>,<p vals>]
+        float *new_p = (float *)malloc((my_p_len + 2) * sizeof(float));
+        new_p[0] = (float)my_id;
+        new_p[1] = (float)slave_elapsed;
+        memcpy(&new_p[2], my_p, my_p_len * sizeof(float));
+        
+        free(my_p);
+        my_p = new_p;
         my_p_len += 2;
     } else {
-        // MASTER: empty p, will be filled by M1PR gather
+        // the master will have an empty p that will be filled
         my_p = NULL;
         my_p_len = 0;
         printf("[Node 0] Master skips MA computation (no rows held)\n\n");
     }
 
-    // ============================================================
-    // PHASE 3: M1PR — Many-to-One Personalized Reduction
-    // ============================================================
+    // Gather all data VIA REVERSE BINOMIAL TREE
     gather_tree(my_id, total_nodes, &my_p, &my_p_len, listening_socket, nodes);
 
     // Master stops timer and prints summary
@@ -989,23 +970,26 @@ int main(int argc, char *argv[]) {
         double total_elapsed = (time_after.tv_sec - time_before.tv_sec) +
                                (time_after.tv_nsec - time_before.tv_nsec) / 1e9;
 
-        // Parse rebuilt vector: each slave contributed (rows_for_node + 2) elements
-        // Layout: [p0...p_{k-1}, node_id, elapsed] per slave, variable k
+       // rebuild by the node id
+       // p per slave rn is -> [<id>,<time>, p-values...]
         double slave_times[MAX_NODES] = {0};
         float *clean_p = (float *)malloc(n * sizeof(float));
         int clean_len = 0;
 
         int offset = 0;
-        for (int s = 1; s < total_nodes; s++) {
-            int slave_cols = rows_for_node(s, n, total_nodes);
-            if (offset + slave_cols + 2 <= my_p_len) {
-                memcpy(&clean_p[clean_len], &my_p[offset], slave_cols * sizeof(float));
+        while (offset < my_p_len) {
+            int sid = (int)my_p[offset];
+            double t = (double)my_p[offset + 1];
+
+            int slave_cols = rows_for_node(sid, n, total_nodes);
+            int dest_index = start_row_for_node(sid, n, total_nodes);
+
+            if (dest_index + slave_cols <= n) {
+                memcpy(&clean_p[dest_index], &my_p[offset + 2], slave_cols * sizeof(float));
                 clean_len += slave_cols;
-                int sid = (int)my_p[offset + slave_cols];
-                double t = (double)my_p[offset + slave_cols + 1];
                 slave_times[sid] = t;
-                offset += slave_cols + 2;
             }
+            offset += (slave_cols + 2);
         }
 
         // Print rebuilt vector p
@@ -1016,7 +1000,7 @@ int main(int argc, char *argv[]) {
         print_vector(clean_p, clean_len);
         printf("\n");
 
-        // SUMMARY TABLE
+        // SUMMARY TABLE (ai printing)
         printf("╔══════════════════════════════════════════════════════════╗\n");
         printf("║                    SUMMARY REPORT                       ║\n");
         printf("╠══════════════════════════════════════════════════════════╣\n");
@@ -1039,7 +1023,7 @@ int main(int argc, char *argv[]) {
         printf("║    (1MPB scatter + slave MA + M1PR gather)              ║\n");
         printf("╚══════════════════════════════════════════════════════════╝\n");
 
-        // Verify results in test mode
+        // Verify results in test mode (ai print)
         if (test_mode && clean_len == 5) {
             float expected[] = {1.414214f, 2.828427f, 4.242641f, 5.656854f, 7.071068f};
             int pass = 1;
