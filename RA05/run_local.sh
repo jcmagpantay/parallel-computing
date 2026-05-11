@@ -36,7 +36,24 @@ TMPEOF
             do script \"bash '$tmp_script'\"
         end tell"
     else
-        gnome-terminal --title="$title" -- bash "$tmp_script"
+        # Priority: xterm > x-terminal-emulator > other DEs > gnome-terminal (snap-broken) > headless
+        if command -v xterm >/dev/null 2>&1; then
+            xterm -T "$title" -e bash "$tmp_script" &
+        elif command -v x-terminal-emulator >/dev/null 2>&1; then
+            x-terminal-emulator -e bash "$tmp_script" &
+        elif command -v konsole >/dev/null 2>&1; then
+            konsole --title "$title" -e bash "$tmp_script" &
+        elif command -v xfce4-terminal >/dev/null 2>&1; then
+            xfce4-terminal --title="$title" -e "bash '$tmp_script'" &
+        elif command -v lxterminal >/dev/null 2>&1; then
+            lxterminal --title="$title" -e "bash '$tmp_script'" &
+        elif command -v mate-terminal >/dev/null 2>&1; then
+            mate-terminal --title="$title" -e "bash '$tmp_script'" &
+        elif command -v gnome-terminal >/dev/null 2>&1; then
+            env -u LD_LIBRARY_PATH -u LD_PRELOAD gnome-terminal --title="$title" -- bash "$tmp_script" >/dev/null 2>&1 &
+        else
+            bash "$tmp_script" >/dev/null 2>&1 &
+        fi
     fi
 }
 
