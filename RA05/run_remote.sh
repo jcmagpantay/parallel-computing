@@ -181,7 +181,7 @@ fi
 echo "All SSH connections OK!"
 echo ""
 
-# --- Deploy binary + generated config to hardware ---
+# --- Deploy source + generated config to hardware ---
 echo "=== Step 5: Deploying to physical slave machines ==="
 for i in $(seq 1 $SLAVE_HW_COUNT); do
     IP="${HW_IPS[$i]}"
@@ -190,12 +190,16 @@ for i in $(seq 1 $SLAVE_HW_COUNT); do
     # Ensure remote directory exists
     eval "$SSH_PREFIX \"$SSH_USER@$IP\" \"mkdir -p $REMOTE_WORKSPACE\" >/dev/null 2>&1"
     
-    # Notice we deploy the completely new GENERATED config 
-    eval "$SCP_PREFIX -q \"$BINARY\" \"$GENERATED_CONFIG\" \"$SSH_USER@$IP:$REMOTE_WORKSPACE/\" 2>/dev/null"
+    # Deploy source code and generated config 
+    eval "$SCP_PREFIX -q \"$SCRIPT_DIR/sockets.c\" \"$GENERATED_CONFIG\" \"$SSH_USER@$IP:$REMOTE_WORKSPACE/\" 2>/dev/null"
+    
+    # Compile remotely on the target hardware to avoid GLIBC mismatch errors
+    eval "$SSH_PREFIX \"$SSH_USER@$IP\" \"cd $REMOTE_WORKSPACE && gcc -O3 sockets.c -lm -pthread -o lab05\" >/dev/null 2>&1"
+
     if [ $? -eq 0 ]; then
         echo "OK"
     else
-        echo "FAILED"
+        echo "FAILED (Remote Compilation)"
         exit 1
     fi
 done
